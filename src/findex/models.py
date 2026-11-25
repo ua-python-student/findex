@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -18,11 +19,33 @@ class DocMeta:
     title: str
 
 
+_ROLE = re.compile(r":[\w:.-]+:`!?~?([^`<]+?)(?:\s*<[^>]*>)?`")
+
+
+def _clean(s: str) -> str:
+    s = _ROLE.sub(r"\1", s)  # :mod:`!asyncio` -> asyncio
+    return s.replace("``", "").replace("`", "").strip("*#= ")
+
+
 def title_of(text: str, fallback: str) -> str:
-    """First line that looks like prose (skips rst directives, labels and ==== underlines)."""
-    for line in text.splitlines()[:40]:
+    """The first reStructuredText heading (a line underlined with =, -, ~, * or #).
+
+    Falls back to the first line that looks like prose, then to ``fallback``.
+    """
+    lines = text.splitlines()[:80]
+    for line, under in zip(lines, lines[1:], strict=False):
+        s, u = line.strip(), under.strip()
+        if (
+            s
+            and any(c.isalpha() for c in s)
+            and len(u) >= max(3, len(s) - 2)
+            and len(set(u)) == 1
+            and u[0] in "=-~*#^"
+        ):
+            return _clean(s)[:120] or fallback
+    for line in lines:
         s = line.strip()
         if not s or s.startswith(("..", ":", "|")) or not any(c.isalpha() for c in s):
             continue
-        return s.strip("*`#= ")[:120] or fallback
+        return _clean(s)[:120] or fallback
     return fallback

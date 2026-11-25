@@ -87,3 +87,56 @@ Both are O(len(a) + len(b)), but the set version does its loop in C (building th
 **Where the bytes went.** 650,769 postings. *Plain dataclass*: ~110 bytes per posting — the object header and its attribute storage (on 3.13 the values live inline, so the per-instance dict is smaller than the "100+ bytes" of older Pythons, but each object still carries the inline-values block and a dict pointer), plus an 8-byte pointer from the list. *Slots*: the object is a fixed 2-slot C struct (`getsizeof` 48 → no hidden dict), ~72 bytes per posting with the list pointer; ×1.5 smaller. Small `int`s (< 257) are cached singletons, and larger doc_ids are separate 28-byte `int` objects in both object rows. *Arrays*: 8 bytes per posting (two raw `uint32`), i.e. ~5 MiB for all postings; the remaining ~20 MiB is per-*term* overhead — 63.6 K keys (`str` objects ~55 B), dict entries and two `array` headers per term — and most terms have df = 1, so for this corpus term overhead dominates. Pickle load of the slotted class is *slower* (1.49 s vs 0.41 s) because `slots=True` dataclasses pickle through a Python-level `__getstate__/__setstate__`, while plain instances use the C fast path for `__dict__`.
 
 REPL experiments (`scripts/experiments/lab02_repl.py`): `dict` grows at 6 → 11 → 22 entries (2/3 load factor); a `__hash__` returning 42 makes 10,000 lookups in a 2,000-element set take 1,202 ms instead of 0.9 ms; `hash('hello')` differs between processes unless `PYTHONHASHSEED=0`; 1 M three-field objects take 130 MiB plain vs 92 MiB slotted; `array('I', range(10**6))` is 3.9 MiB vs 7.6 MiB for the list *plus* 26.7 MiB of `int` objects it points to.
+
+## Lab 3 — Ranking and the object model
+
+```bash
+uv run python -m findex.index data/ --out index.bin --positions
+uv run python -m findex.search index.bin 'python AND (async OR await) NOT java "event loop"' --rank bm25 --k 5 -v
+uv run python scripts/sanity_lab03.py index.bin   # the three ranking sanity checks
+uv run python scripts/eval_lab03.py index.bin     # precision@5
+```
+
+* `findex.index.Index(Mapping[str, list[Posting]])` — `len`, `in`, `ix[term]` (`KeyError` if absent), iteration, `repr` → `Index(terms=63_582, docs=1_596, positions=True)`; `num_docs` (`property`), `avg_doc_length` (`cached_property` — computed once, BM25 reads it for every posting), `df()`, `doc_length()`, `doc_text()`.
+* `findex.store.open_index(path)` — `@contextmanager`; `close()` runs in `finally`, also when the body raises (tested).
+* `findex.scoring` — `Scorer` protocol (`score(term, posting, index) -> float`); `TfIdf` and `BM25(k1=1.5, b=0.75)` are frozen dataclasses (hashable → usable as `lru_cache` keys) with `__call__`, no common base class.
+* `findex.query` — recursive-descent parser → `Term`/`Phrase`/`And`/`Or`/`Not` nodes; nodes overload `&`, `|`, `~`; `evaluate(index)` uses the Lab 2 merges; phrases check positions (`p`, `p+1`, …). Parser tests compare trees: `parse("a OR b c") == Or(Term("a"), And(Term("b"), Term("c")))`.
+* `findex.ranking` — scores accumulate in a dict over the matched set, top-k by `heapq.nlargest` (O(n log k)); `SearchResult(score, doc_id, title, path, snippet)` is `order=True` — score is the *first* field so that ordering means relevance.
+* `@timed` (`findex.timing`, with `functools.wraps`) on `build_index`, `load`, `rank`, `search_page` → DEBUG log. A per-index `functools.lru_cache(maxsize=256)` caches query → ranked ids.
+* Snippets: ±80 characters around the match whose window contains the most distinct query terms, matches wrapped in `**…**`.
+
+### Cache hit in the log (`-v`)
+
+```text
+findex.timing: rank took 3.7 ms
+findex.timing: search_page took 18.5 ms
+ 1.  24.951  A conceptual overview of asyncio  (cpython/howto/a-conceptual-overview-of-asyncio.txt)
+findex.ranking: cache hit for 'python AND (async OR await) NOT java "event loop"' (bm25, k=3)
+findex.timing: search_page took 14.0 ms
+```
+
+On the second run `rank` is not called at all (no `rank took` line). What remains (~14 ms) is building snippets — decompressing three documents and running the highlight regex — which is deliberately not cached.
+
+### Ranking sanity checks (real corpus, `scripts/sanity_lab03.py`)
+
+1. **Rare beats common.** Query `the OR pickletools` (df 1474 vs 8): the best document containing `pickletools` is rank 1 with BM25 12.22; the best document with only `the` is rank 9 with 0.20.
+2. **Saturation.** BM25 contribution of `generator` (df 132) in a document of average length (1,930 tokens): tf 1 → 2.49, 2 → 3.55, 5 → 4.79, 10 → 5.41, 19 → 5.77, 20 → 5.79. The 20th occurrence adds 0.021 (0.37 % of the score); the ceiling is idf·(k1+1) = 6.22. TF-IDF with `1+log tf` keeps growing: 2.49 → 9.96.
+3. **Length normalisation.** `sentinel` occurs once in a 291-token document (`c-api/concrete`) and once in a 28,485-token one (`numpy c-api/array`): BM25 6.12 vs 0.53 (rank 7 vs 36 of 36); TF-IDF gives both exactly 3.79.
+
+### precision@5, TF-IDF vs BM25 (10 hand-labelled queries in `eval/queries.json`, query = OR of its words)
+
+| # | Query | relevant | P@5 TF-IDF | P@5 BM25 |
+|---|---|---|---|---|
+| 1 | asyncio task cancellation timeout | 3 | 0.2 | 0.2 |
+| 2 | pickle security untrusted data | 1 | 0.2 | 0.2 |
+| 3 | numpy broadcasting rules | 2 | 0.2 | 0.2 |
+| 4 | django database migrations | 3 | 0.2 | 0.6 |
+| 5 | logging handler formatter | 5 | 0.6 | 0.6 |
+| 6 | regular expression groups | 2 | 0.4 | 0.4 |
+| 7 | dataclass frozen slots | 1 | 0.2 | 0.2 |
+| 8 | django cache backend | 1 | 0.2 | 0.2 |
+| 9 | random number generator seed | 5 | 0.6 | 0.6 |
+| 10 | free threading GIL | 4 | 0.8 | 0.4 |
+| | **mean** | | **0.36** | **0.36** |
+
+With only 1–5 relevant documents per query the maximum P@5 is often 0.2–0.6, so the means are small by construction (the ceiling for this set is 0.58). The two scorers tie on average: BM25 wins on *django database migrations* (TF-IDF pulls in the very long release notes that mention "database" hundreds of times; length normalisation pushes them down), TF-IDF wins on *free threading GIL*, where the relevant documents are the long *What's New in 3.13/3.14* pages that BM25 penalises for length. Ten queries is noise-level evidence; the habit of measuring is the point.

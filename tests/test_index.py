@@ -15,9 +15,9 @@ DOCS = [
 
 def test_postings_sorted_and_tf() -> None:
     ix = build_index(DOCS)
-    assert [p.doc_id for p in ix.postings["python"]] == [0, 1]
-    assert ix.postings["python"][0].tf == 2
-    for plist in ix.postings.values():
+    assert [p.doc_id for p in ix["python"]] == [0, 1]
+    assert ix["python"][0].tf == 2
+    for plist in ix.values():
         ids = [p.doc_id for p in plist]
         assert ids == sorted(ids)
     assert ix.doc_lengths[2] == 4

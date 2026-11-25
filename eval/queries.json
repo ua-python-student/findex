@@ -1,0 +1,20 @@
+{
+  "_comment": "Hand-labelled: documents that SHOULD be in the top 5. 'paraphrase' queries deliberately avoid the documents' own words (used in Lab 8).",
+  "queries": [
+    {"q": "asyncio task cancellation timeout", "relevant": ["cpython/library/asyncio-task.txt", "cpython/howto/a-conceptual-overview-of-asyncio.txt", "cpython/library/asyncio-exceptions.txt"]},
+    {"q": "pickle security untrusted data", "relevant": ["cpython/library/pickle.txt"]},
+    {"q": "numpy broadcasting rules", "relevant": ["numpy/user/basics.broadcasting.txt", "numpy/user/theory.broadcasting.txt"]},
+    {"q": "django database migrations", "relevant": ["django/topics/migrations.txt", "django/howto/writing-migrations.txt", "django/ref/migration-operations.txt"]},
+    {"q": "logging handler formatter", "relevant": ["cpython/howto/logging.txt", "cpython/library/logging.txt", "cpython/library/logging.handlers.txt", "cpython/howto/logging-cookbook.txt", "django/topics/logging.txt"]},
+    {"q": "regular expression groups", "relevant": ["cpython/howto/regex.txt", "cpython/library/re.txt"]},
+    {"q": "dataclass frozen slots", "relevant": ["cpython/library/dataclasses.txt"]},
+    {"q": "django cache backend", "relevant": ["django/topics/cache.txt"]},
+    {"q": "random number generator seed", "relevant": ["numpy/reference/random/generator.txt", "numpy/reference/random/index.txt", "numpy/reference/random/legacy.txt", "cpython/library/random.txt", "numpy/reference/random/parallel.txt"]},
+    {"q": "free threading GIL", "relevant": ["cpython/howto/free-threading-python.txt", "cpython/howto/free-threading-extensions.txt", "cpython/whatsnew/3.13.txt", "cpython/whatsnew/3.14.txt"]},
+    {"q": "run several coroutines at the same time and wait for all of them", "paraphrase": true, "relevant": ["cpython/library/asyncio-task.txt", "cpython/howto/a-conceptual-overview-of-asyncio.txt"]},
+    {"q": "save python objects to a file and restore them later", "paraphrase": true, "relevant": ["cpython/library/pickle.txt", "cpython/library/shelve.txt", "cpython/library/marshal.txt"]},
+    {"q": "show my website in other languages", "paraphrase": true, "relevant": ["django/topics/i18n/translation.txt", "django/topics/i18n/index.txt"]},
+    {"q": "arithmetic between arrays of different shapes", "paraphrase": true, "relevant": ["numpy/user/basics.broadcasting.txt", "numpy/user/theory.broadcasting.txt"]},
+    {"q": "split a long list of results across several pages", "paraphrase": true, "relevant": ["django/topics/pagination.txt"]}
+  ]
+}

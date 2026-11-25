@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-from findex.index import IndexData
+from findex.index import Index
 from findex.tokenize import tokenize
 
 Engine = Literal["merge", "set"]
@@ -91,11 +91,11 @@ OPS = {
 }
 
 
-def doc_ids(index: IndexData, term: str) -> list[int]:
-    return [p.doc_id for p in index.postings.get(term, ())]
+def doc_ids(index: Index, term: str) -> list[int]:
+    return [p.doc_id for p in index.get(term, ())]
 
 
-def boolean_search(index: IndexData, query: str, engine: Engine = "merge") -> list[int]:
+def boolean_search(index: Index, query: str, engine: Engine = "merge") -> list[int]:
     ops = OPS[engine]
     result: list[int] | None = None
     op = "AND"
@@ -111,31 +111,45 @@ def boolean_search(index: IndexData, query: str, engine: Engine = "merge") -> li
 
 
 def main(argv: list[str] | None = None) -> None:
-    from findex import store
+    import logging
+
+    from findex.ranking import search
+    from findex.scoring import SCORERS
+    from findex.store import open_index
 
     p = argparse.ArgumentParser(prog="python -m findex.search")
     p.add_argument("index", type=Path)
-    p.add_argument("query")
-    p.add_argument("--engine", choices=["merge", "set"], default="merge")
-    p.add_argument("--show", type=int, default=10)
+    p.add_argument("query", nargs="+", help="one or more queries; repeated ones hit the cache")
+    p.add_argument("--rank", choices=["bm25", "tfidf", "none"], default="bm25")
+    p.add_argument("--engine", choices=["merge", "set"], default="merge", help="for --rank none")
+    p.add_argument("--k", type=int, default=10)
+    p.add_argument("-v", "--verbose", action="store_true", help="DEBUG log: @timed, cache hits")
     args = p.parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING, format="%(name)s: %(message)s"
+    )
 
     tracemalloc.start()
     t0 = time.perf_counter()
-    index = store.load(args.index)
-    t_load = time.perf_counter() - t0
-    t1 = time.perf_counter()
-    hits = boolean_search(index, args.query, args.engine)
-    t_search = time.perf_counter() - t1
+    with open_index(args.index) as index:
+        print(f"{index!r} loaded in {time.perf_counter() - t0:.2f} s")
+        for q in args.query:
+            t1 = time.perf_counter()
+            if args.rank == "none":
+                hits = boolean_search(index, q, args.engine)
+                ms = (time.perf_counter() - t1) * 1000
+                print(f"{len(hits)} documents match {q!r} ({ms:.2f} ms, {args.engine})")
+                for d in hits[: args.k]:
+                    print(f"  [{d}] {index.title(d)}  ({index.doc_meta[d].path})")
+                continue
+            results = search(index, q, SCORERS[args.rank], args.k)
+            ms = (time.perf_counter() - t1) * 1000
+            print(f"\n{q!r}: top {len(results)} by {args.rank} ({ms:.2f} ms)")
+            for i, r in enumerate(results, 1):
+                print(f"{i:>2}. {r.score:7.3f}  {r.title}  ({r.path})")
+                print(f"           {r.snippet}")
     _, peak = tracemalloc.get_traced_memory()
-    print(f"{len(hits)} documents match {args.query!r}")
-    for d in hits[: args.show]:
-        m = index.doc_meta[d]
-        print(f"  [{d}] {m.title}  ({m.path})")
-    print(
-        f"load: {t_load:.2f} s, search: {t_search * 1000:.2f} ms ({args.engine}), "
-        f"peak memory: {peak / 2**20:.1f} MiB"
-    )
+    print(f"peak memory: {peak / 2**20:.1f} MiB")
 
 
 if __name__ == "__main__":
