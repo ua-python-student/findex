@@ -39,9 +39,7 @@ def lazy_stats(docs: Iterable[Document], top: int = 50) -> Stats:
 def eager_stats(docs: Iterable[Document], top: int = 50) -> Stats:
     """The deliberately eager version: every stage is a list."""
     all_docs = list(docs)  # whole corpus text in RAM
-    all_tokens = [
-        list(tokenize(d.text)) for d in all_docs
-    ]  # every token as a str object
+    all_tokens = [list(tokenize(d.text)) for d in all_docs]  # every token as a str object
     flat = [t for toks in all_tokens for t in toks]  # and once more, flattened
     counts = Counter(flat)
     return Stats(len(all_docs), len(flat), len(counts), counts.most_common(top))

@@ -45,9 +45,7 @@ def _iter_jsonl(path: Path, start_id: int) -> Iterator[Document]:
                 continue
             text = rec.get("text", "")
             title = rec.get("title") or ""
-            yield Document(
-                doc_id, rec.get("url") or f"{path}:{lineno}", f"{title}\n{text}"
-            )
+            yield Document(doc_id, rec.get("url") or f"{path}:{lineno}", f"{title}\n{text}")
             doc_id += 1
 
 
