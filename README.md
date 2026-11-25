@@ -2,9 +2,9 @@
 
 **findex** indexes 1,596 documents of the Python, Django and NumPy documentation and answers Boolean, phrase, BM25-ranked, semantic and hybrid queries — from a CLI, a JSON API and a web page. Every layer (tokenizer, inverted index, ranking, query parser, parallel indexer, async crawler, web service, NumPy scorer, embeddings) is written in this repository, one lab at a time.
 
-> **Live demo:** `https://findex-<user>.onrender.com` — *added after deployment (Lab 7)* · **Demo video (2–3 min):** *link added after recording* · **GIF of a search:** `docs/demo.gif` *(to be recorded from the running UI)*
+> **Live demo:** `https://findex-ua-python-student.onrender.com` — *added after deployment (Lab 7)* · **Demo video (2–3 min):** *link added after recording* · **GIF of a search:** `docs/demo.gif` *(to be recorded from the running UI)*
 
-[![CI](https://github.com/<user>/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/findex/actions/workflows/ci.yml)
+[![CI](https://github.com/ua-python-student/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/ua-python-student/findex/actions/workflows/ci.yml)
 
 | Corpus | Search latency | Biggest speedup |
 |---|---|---|
@@ -220,7 +220,7 @@ findex -vv search ...                 # DEBUG log (@timed, cache hits) on stderr
 * **Packaging.** PEP 621 `pyproject.toml`, `uv.lock` committed, `src/` layout, `[project.scripts] findex = "findex.cli:app"`, version 0.4.0. `uv build` → `dist/findex-0.4.0-py3-none-any.whl`; installed into a clean tool environment with `uv tool install <wheel>` → `findex --help` and `findex --version` work (the installer writes a `bin/findex` script that imports `findex.cli:app`).
 * **Logging.** `log = logging.getLogger(__name__)` in modules; configured once in the CLI callback (`-v` INFO, `-vv` DEBUG) with a `RichHandler` on **stderr**; data (tables, JSON lines) on stdout. Expected errors print one line and exit non-zero: missing index → 1, bad query syntax → 2.
 * **CI.** `.github/workflows/ci.yml`: `uv sync --locked`, `ruff check`, `ruff format --check`, `pyright`, `pytest` on every push/PR, on 3.13 and free-threaded 3.13t.
-* **Release.** `git tag v0.4.0 && gh release create v0.4.0 dist/findex-0.4.0-py3-none-any.whl` — then anyone can `uv tool install https://github.com/<user>/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl`.
+* **Release.** `git tag v0.4.0 && gh release create v0.4.0 dist/findex-0.4.0-py3-none-any.whl` — then anyone can `uv tool install https://github.com/ua-python-student/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl`.
 
 ```text
          'asyncio (TaskGroup OR gather) "structured concurrency"': 1 matches, top 1 by bm25 (2.6 ms)
@@ -317,7 +317,7 @@ findex index data/crawl.jsonl --out crawl.bin && findex search crawl.bin '"event
 uv run python scripts/bench_lab06.py                        # the table below
 ```
 
-**Ethics / permission.** The crawler was run **only against a local mirror** that I generated from my own corpus (`scripts/mirror_server.py`): 1,668 pages on three loopback "hosts" (127.0.0.1 = Python docs, 127.0.0.2 = Django, 127.0.0.3 = NumPy), with 50–200 ms random latency per response and deliberate misbehaviour (every 50th request → 429 with `Retry-After: 1`, every 70th → 503, a `/loop/a ↔ /loop/b` redirect loop, a 404, `/private/` disallowed in `robots.txt`, links to an external site and URL variants that differ only by fragment, slash or query order). No third-party site was crawled. The crawler sends `User-Agent: findex-crawler/0.7 (+https://github.com/<user>/findex; student project)`, obeys `robots.txt`, limits requests per host and stays inside the domain allowlist.
+**Ethics / permission.** The crawler was run **only against a local mirror** that I generated from my own corpus (`scripts/mirror_server.py`): 1,668 pages on three loopback "hosts" (127.0.0.1 = Python docs, 127.0.0.2 = Django, 127.0.0.3 = NumPy), with 50–200 ms random latency per response and deliberate misbehaviour (every 50th request → 429 with `Retry-After: 1`, every 70th → 503, a `/loop/a ↔ /loop/b` redirect loop, a 404, `/private/` disallowed in `robots.txt`, links to an external site and URL variants that differ only by fragment, slash or query order). No third-party site was crawled. The crawler sends `User-Agent: findex-crawler/0.7 (+https://github.com/ua-python-student/findex; student project)`, obeys `robots.txt`, limits requests per host and stays inside the domain allowlist.
 
 * `crawler/fetch.py` — `fetch(client, url)`: `asyncio.timeout` per attempt; retries **only** 429, 5xx, timeouts and transport errors, at most 3 times, with exponential backoff + jitter (`min(cap, 0.5·2^n) + U(0, 0.5)`); a 429's `Retry-After` (seconds or HTTP date) replaces the backoff; other 4xx are never retried; redirect loops (`TooManyRedirects`) are recorded, not retried. Returns `FetchResult(url, status, final_url, content_type, text, nbytes, elapsed, attempts, error)`.
 * `crawler/robots.py` — `RobotsCache`: one `robots.txt` request per host (an `asyncio.Lock` per origin, so 20 workers do not fetch it 20 times — tested); 4xx → allow all, 5xx/unreachable → disallow all.
@@ -410,7 +410,7 @@ Throughput is the same — there is one core's worth of Python to execute either
 
 ### Deployment
 
-Multi-stage `Dockerfile` (uv's official image as the builder, `uv sync --locked --no-dev`, then a `python:3.13-slim` runtime with only `.venv` and the app, non-root user `app`, `HEALTHCHECK` on `/health`, config only from `INDEX_PATH`/`PORT`/`LOG_LEVEL`), `.dockerignore`, and `render.yaml` (Docker runtime, `healthCheckPath: /health`). Deploying is: push the repo, create the Render (or Fly.io) service from it, wait for the green health check, put the URL at the top of this README and run `python scripts/loadtest.py "https://<url>/search?q={q}" -c 20 -z 30` for the last row. *My work environment had neither Docker nor access to a hosting platform, so the image was not built and the service was not deployed here — this row and the live URL are the remaining steps.*
+Multi-stage `Dockerfile` (uv's official image as the builder, `uv sync --locked --no-dev`; the builder also downloads the corpus and runs `findex index --no-positions` + `findex embed`, so the image carries its own index and the running service stays under 512 MB — phrase queries are therefore off in the deployed demo; then a `python:3.13-slim` runtime with only `.venv` and the app, non-root user `app`, `HEALTHCHECK` on `/health`, config only from `INDEX_PATH`/`PORT`/`LOG_LEVEL`), `.dockerignore`, and `render.yaml` (Docker runtime, `healthCheckPath: /health`). Deploying is: push the repo, create the Render (or Fly.io) service from it, wait for the green health check, put the URL at the top of this README and run `python scripts/loadtest.py "https://<url>/search?q={q}" -c 20 -z 30` for the last row. *My work environment had neither Docker nor access to a hosting platform, so the image was not built and the service was not deployed here — this row and the live URL are the remaining steps.*
 
 ## Lab 8 — Fast, then smart: profiling, NumPy, semantic search
 
