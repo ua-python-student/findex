@@ -1,0 +1,13 @@
+data/
+*.bin
+*.pkl
+*.idx
+__pycache__/
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.prof
+crawl.log
+mirror/
