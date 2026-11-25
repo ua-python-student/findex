@@ -1,0 +1,10 @@
+.venv
+.venv-ft
+data
+dist
+bench
+.git
+**/__pycache__
+.pytest_cache
+.ruff_cache
+crawl.log

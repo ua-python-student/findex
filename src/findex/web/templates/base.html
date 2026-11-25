@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}findex{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body>
+  <header><a class="logo" href="/">find<b>ex</b></a>
+    <nav><a href="/docs">API</a> · <a href="/stats">stats</a></nav></header>
+  <main>{% block content %}{% endblock %}</main>
+  <footer>BM25 over {{ num_docs | default('') }} documents · built from scratch in Python</footer>
+</body>
+</html>

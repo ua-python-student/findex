@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ q ~ ' — ' if q }}findex{% endblock %}
+{% block content %}
+<form action="/" method="get" class="search" role="search">
+  <input type="search" name="q" value="{{ q }}" placeholder='asyncio (TaskGroup OR gather) "event loop"'
+         autofocus autocomplete="off" aria-label="query"
+         hx-get="/" hx-trigger="keyup changed delay:300ms, search" hx-target="#results" hx-push-url="true"
+         hx-include="[name=scorer]">
+  <select name="scorer" aria-label="ranking">
+    <option value="bm25" {{ 'selected' if scorer == 'bm25' }}>BM25</option>
+    <option value="tfidf" {{ 'selected' if scorer == 'tfidf' }}>TF-IDF</option>
+  </select>
+  <button type="submit">Search</button>
+</form>
+<p class="hint">AND is implicit · <code>OR</code> · <code>NOT</code> · <code>( )</code> · <code>"exact phrase"</code></p>
+<section id="results">{% include "_results.html" %}</section>
+{% endblock %}

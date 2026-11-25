@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ d.title }} — findex{% endblock %}
+{% block content %}
+<p><a href="/?q={{ q | urlencode }}">← back to results</a></p>
+<h1>{{ d.title }}</h1>
+<p class="path">{{ d.path }} · {{ d.length }} tokens · <a href="/docs/{{ d.doc_id }}">JSON</a></p>
+<pre class="doc">{{ d.text }}</pre>
+{% endblock %}

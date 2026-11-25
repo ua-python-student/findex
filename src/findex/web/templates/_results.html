@@ -1,0 +1,20 @@
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if res %}
+  <p class="meta">{{ res.total }} result{{ '' if res.total == 1 else 's' }} · {{ res.took_ms }} ms · page {{ res.page }} of {{ res.pages }}</p>
+  <ol class="results" start="{{ (res.page - 1) * res.k + 1 }}">
+  {% for r in res.results %}
+    <li>
+      <a class="title" href="/doc/{{ r.doc_id }}?q={{ q | urlencode }}">{{ r.title }}</a>
+      <span class="score">{{ '%.2f' % r.score }}</span>
+      <div class="path">{{ r.path }}</div>
+      <p class="snippet">{{ r.snippet | highlight }}</p>
+    </li>
+  {% endfor %}
+  </ol>
+  {% if res.pages > 1 %}
+  <nav class="pager">
+    {% if res.page > 1 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ res.page - 1 }}">← previous</a>{% endif %}
+    {% if res.page < res.pages %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ res.page + 1 }}">next →</a>{% endif %}
+  </nav>
+  {% endif %}
+{% elif q and not error %}<p class="meta">Nothing matches <b>{{ q }}</b>.</p>{% endif %}

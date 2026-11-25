@@ -14,7 +14,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-USER_AGENT = "findex-crawler/0.6 (+https://github.com/<user>/findex; student project)"
+USER_AGENT = "findex-crawler/0.7 (+https://github.com/<user>/findex; student project)"
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 

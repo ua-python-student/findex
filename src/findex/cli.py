@@ -261,3 +261,27 @@ def crawl(
         f"{stats.pages} pages in {stats.elapsed:.1f} s ({stats.pages_per_s:.1f}/s), {stats.errors} errors, "
         f"{stats.retries} retries -> {out_path}; per-URL log: {log_path}"
     )
+
+
+@app.command()
+def serve(
+    index_path: Annotated[Path | None, typer.Option("--index", help="Sets INDEX_PATH.")] = None,
+    host: Annotated[str, typer.Option()] = "127.0.0.1",
+    port: Annotated[int, typer.Option(envvar="PORT")] = 8000,
+    workers: Annotated[int, typer.Option(min=1, help="uvicorn worker processes.")] = 1,
+) -> None:
+    """Run the web API + UI with uvicorn (config from the environment / .env)."""
+    import uvicorn
+
+    if index_path is not None:
+        os.environ["INDEX_PATH"] = str(index_path)  # workers are separate processes: pass config via env
+    level = logging.getLevelName(logging.getLogger().getEffectiveLevel()).lower()
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+        log_level=level,
+        proxy_headers=True,
+        backlog=2048,
+    )

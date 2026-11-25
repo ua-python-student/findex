@@ -1,5 +1,7 @@
 # findex — a search engine built from scratch in Python
 
+> **Live demo:** `https://findex-<user>.onrender.com` — *to be filled in after deployment (see Lab 7, "Deployment")* · API docs at `/docs`
+
 [![CI](https://github.com/<user>/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/findex/actions/workflows/ci.yml)
 
 Semester project for the course *Python — Build a Search Engine*. One lab = one language feature + one project step.
@@ -257,7 +259,7 @@ findex index data/crawl.jsonl --out crawl.bin && findex search crawl.bin '"event
 uv run python scripts/bench_lab06.py                        # the table below
 ```
 
-**Ethics / permission.** The crawler was run **only against a local mirror** that I generated from my own corpus (`scripts/mirror_server.py`): 1,668 pages on three loopback "hosts" (127.0.0.1 = Python docs, 127.0.0.2 = Django, 127.0.0.3 = NumPy), with 50–200 ms random latency per response and deliberate misbehaviour (every 50th request → 429 with `Retry-After: 1`, every 70th → 503, a `/loop/a ↔ /loop/b` redirect loop, a 404, `/private/` disallowed in `robots.txt`, links to an external site and URL variants that differ only by fragment, slash or query order). No third-party site was crawled. The crawler sends `User-Agent: findex-crawler/0.6 (+https://github.com/<user>/findex; student project)`, obeys `robots.txt`, limits requests per host and stays inside the domain allowlist.
+**Ethics / permission.** The crawler was run **only against a local mirror** that I generated from my own corpus (`scripts/mirror_server.py`): 1,668 pages on three loopback "hosts" (127.0.0.1 = Python docs, 127.0.0.2 = Django, 127.0.0.3 = NumPy), with 50–200 ms random latency per response and deliberate misbehaviour (every 50th request → 429 with `Retry-After: 1`, every 70th → 503, a `/loop/a ↔ /loop/b` redirect loop, a 404, `/private/` disallowed in `robots.txt`, links to an external site and URL variants that differ only by fragment, slash or query order). No third-party site was crawled. The crawler sends `User-Agent: findex-crawler/0.7 (+https://github.com/<user>/findex; student project)`, obeys `robots.txt`, limits requests per host and stays inside the domain allowlist.
 
 * `crawler/fetch.py` — `fetch(client, url)`: `asyncio.timeout` per attempt; retries **only** 429, 5xx, timeouts and transport errors, at most 3 times, with exponential backoff + jitter (`min(cap, 0.5·2^n) + U(0, 0.5)`); a 429's `Retry-After` (seconds or HTTP date) replaces the backoff; other 4xx are never retried; redirect loops (`TooManyRedirects`) are recorded, not retried. Returns `FetchResult(url, status, final_url, content_type, text, nbytes, elapsed, attempts, error)`.
 * `crawler/robots.py` — `RobotsCache`: one `robots.txt` request per host (an `asyncio.Lock` per origin, so 20 workers do not fetch it 20 times — tested); 4xx → allow all, 5xx/unreachable → disallow all.
@@ -299,3 +301,55 @@ INFO findex.crawler.fetch: retry 1/3 for http://127.0.0.1:8765/ after HTTP 503, 
 2026-11-25T14:51:21.284+00:00	0	0	925ms	1	http://127.0.0.1:8765/loop/a	redirect loop
 2026-11-25T14:51:18.590+00:00	0	0	0ms	0	http://127.0.0.1:8765/private/secret.html	disallowed by robots.txt
 ```
+
+## Lab 7 — Search on the web: FastAPI, Pydantic, Docker
+
+```bash
+INDEX_PATH=index.bin findex serve --port 8000 [--workers 4]      # or: uvicorn findex.web.app:app
+curl 'localhost:8000/search?q=asyncio%20TaskGroup&k=5&scorer=bm25&page=1'
+open http://localhost:8000/        # UI;   http://localhost:8000/docs  — OpenAPI (Swagger) page
+docker build -t findex . && docker run -e INDEX_PATH=/app/index.bin -p 8000:8000 findex
+./scripts/bench_lab07.sh                                          # load-test table
+```
+
+* `src/findex/web/app.py` — FastAPI app. **`lifespan`** (async context manager) loads the index **once** at startup with `asyncio.to_thread(store.load, …)`, stores it in `app.state.index`, releases it on shutdown. **`get_index`** / **`get_settings`** are `Depends` dependencies; `get_index` raises 503 if nothing is loaded.
+* Routes: `GET /search?q=&k=&scorer=&page=` → `SearchResponse{query, scorer, total, page, k, pages, took_ms, results[SearchHit{doc_id, title, path, score, snippet}]}` — `q` 1–200 chars, `k` 1–100, `scorer: Literal["bm25","tfidf"]`, `page` ≥ 1, anything else → **422** with a JSON `detail`; bad query syntax → 400. `GET /docs/{doc_id}` → the document or **404** via `HTTPException`. `GET /stats` → documents, vocabulary, tokens, index size, uptime, version. `GET /health` → `{"status": "ok"}` or **503** if the index is not loaded.
+* `schemas.py` — Pydantic models only at the edges (`SearchHit.from_result` is the single seam); inside, the Lab 2–3 dataclasses stay. `settings.py` — `Settings(BaseSettings)`: `INDEX_PATH`, `LOG_LEVEL`, `PORT` from the environment / `.env` (`.env.example` committed, `.env` ignored); no paths in code.
+* Middleware assigns a request id (or keeps the client's `X-Request-ID`), returns it as a header, logs every request at DEBUG; an unexpected exception is logged with the request id and becomes a clean `500 {"detail": "internal server error", "request_id": …}` — no traceback leaves the server. Logs go to stdout.
+* UI: `GET /` — Jinja2 page with search box, scorer switch, results with `<mark>`-highlighted snippets (escaped first, then highlighted), scores, previous/next pagination; **htmx** search-as-you-type (`hx-get="/" hx-trigger="keyup changed delay:300ms"`; the same route returns only the `_results.html` fragment when it sees `HX-Request`). `GET /doc/{doc_id}` — the full document. CSS served by `StaticFiles`.
+* `findex serve [--index] [--host] [--port] [--workers N]` wraps `uvicorn.run`, so the CLI stays the entry point.
+* Tests (`tests/test_web.py`, 14): `TestClient` with `app.dependency_overrides[get_index]` → the tiny fixture index, `INDEX_PATH` set to a missing file via `monkeypatch` — no real index in tests. Success, pagination, five kinds of 422, 400, 404, `/stats`, `/health` 503 when unloaded and 200 when loaded, UI page + htmx fragment + document page, OpenAPI paths.
+
+### `def` or `async def` for `/search`? (M2: 20 concurrent requests + a `/health` probe sent while they run; median of 3)
+
+The search is CPU work (parse, score ~1,400 matches, build snippets: ~25 ms). The same function behind three route styles:
+
+| Route | 20 requests, wall (s) | mean latency (ms) | max (ms) | /health during load (ms) |
+|---|---|---|---|---|
+| async def (blocking) | 0.50 | 394 | 494 | 448 |
+| def (thread pool) | 0.51 | 395 | 500 | 160 |
+| async def + to_thread | 0.47 | 286 | 471 | 96 |
+
+Throughput is the same — there is one core's worth of Python to execute either way. The difference is what happens to *everything else*: in the `async def` version the CPU work runs on the event loop itself, so the `/health` probe waits until all 20 searches are done (448 ms — a platform health check with a short timeout would mark the instance dead under load). With plain `def`, FastAPI runs the handler in its thread pool and the loop stays free: `/health` answers in 160 ms (it still competes for the GIL with the search threads), 96 ms with `async def` + `asyncio.to_thread`. **Decision: `/search` is a plain `def`.** (The two `/_bench/...` routes exist only for this experiment and are hidden from the OpenAPI schema.)
+
+### Load test (concurrency 50, 30 s after a 3 s warm-up, queries rotate over 1,000 generated `python X OR Y` queries — more than the 256-entry cache)
+
+`oha` could not be installed in my environment (no binary downloads allowed), so `scripts/loadtest.py` does the same job: N concurrent `httpx` connections for D seconds, then RPS and p50/p95/p99 from the latency list. The client is light (2 s of CPU for a 15 s run), but it runs on the same 2-vCPU machine as the server.
+
+| Target | Route | Connections | Concurrency | RPS | p50 (ms) | p95 | p99 |
+|---|---|---|---|---|---|---|---|
+| local, 1 worker, async def (blocking) | `/_bench/search-async` | keep-alive | 50 | 62.4 | 799.8 | 982.5 | 1077.1 |
+| local, 1 worker, def (thread pool) | `/search` | keep-alive | 50 | 55.2 | 890.4 | 1199.8 | 1311.0 |
+| local, 1 worker, async def + to_thread | `/_bench/search-to-thread` | keep-alive | 50 | 56.6 | 882.1 | 1026.6 | 1085.6 |
+| local, 2 workers, def | `/search` | keep-alive | 50 | 54.3 (rerun: 53.7) | 897.9 | 1260.6 | 1412.5 |
+| local, 4 workers, def | `/search` | keep-alive | 50 | 96.1 (rerun: 52.6) | 260.1 (921.9) | 1187.2 (1255.3) | 1365.0 (1452.5) |
+| local, 1 worker, def (thread pool) | `/search` | new per request | 50 | 54.4 | 909.5 | 1127.2 | 1207.1 |
+| local, 2 workers, def | `/search` | new per request | 50 | 86.8 | 567.3 | 917.3 | 1016.9 |
+| local, 4 workers, def | `/search` | new per request | 50 | 105.4 | 425.2 | 950.8 | 1151.1 |
+| deployed (Render free tier) | `/search` | keep-alive | 20 | — | — | — | — |
+
+**Reading the table (Labs 5–6).** One worker is CPU-bound at ~55–60 RPS (≈ 17 ms of Python per request): under 50 concurrent clients, requests simply queue, so p50 ≈ 50 × 17 ms ≈ 0.85 s. Inside one worker the **GIL** (Lab 5) serialises the Python work whatever the route style: the thread pool (`def`) does not add throughput, it only keeps the event loop responsive (Lab 6's rule: never block the loop) — which is why the blocking `async def` row even has slightly higher RPS (no thread hand-off) but the worst behaviour for other requests. **More processes** (`--workers`, one interpreter and one GIL each — Lab 5's processes) are what raise throughput: with a new connection per request 1 → 2 workers is 54 → 87 RPS and p50 drops from 910 to 567 ms; 4 workers on 2 cores reach 105 RPS only because some time is spent waiting on I/O, there is no third core. With **keep-alive** connections the extra workers did *not* help reliably (54 RPS at 2 workers; 96 then 53 at 4 workers): uvicorn's workers share one listening socket, each long-lived connection sticks to whichever process accepted it, and `ps` showed one worker at 91 % CPU and the other at 31 %. A load balancer or `SO_REUSEPORT` fixes this in production; `oha` with keep-alive would show the same skew. The p99/p50 ratio (~1.2–1.5) comes from queueing behind CPU-bound requests and GIL hand-offs, not from GC pauses.
+
+### Deployment
+
+Multi-stage `Dockerfile` (uv's official image as the builder, `uv sync --locked --no-dev`, then a `python:3.13-slim` runtime with only `.venv` and the app, non-root user `app`, `HEALTHCHECK` on `/health`, config only from `INDEX_PATH`/`PORT`/`LOG_LEVEL`), `.dockerignore`, and `render.yaml` (Docker runtime, `healthCheckPath: /health`). Deploying is: push the repo, create the Render (or Fly.io) service from it, wait for the green health check, put the URL at the top of this README and run `python scripts/loadtest.py "https://<url>/search?q={q}" -c 20 -z 30` for the last row. *My work environment had neither Docker nor access to a hosting platform, so the image was not built and the service was not deployed here — this row and the live URL are the remaining steps.*

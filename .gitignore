@@ -1,5 +1,6 @@
 data/
 *.bin
+!docs/*.bin
 *.pkl
 *.idx
 __pycache__/
@@ -12,3 +13,4 @@ dist/
 crawl.log
 mirror/
 .venv-ft/
+.env
