@@ -11,3 +11,4 @@ dist/
 *.prof
 crawl.log
 mirror/
+.venv-ft/

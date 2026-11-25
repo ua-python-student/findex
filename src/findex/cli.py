@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from collections import Counter
@@ -25,6 +26,7 @@ from rich.table import Table
 from findex import __version__, store
 from findex.corpus import Document, iter_documents
 from findex.index import build_index
+from findex.parallel import BuildTimings, build_parallel
 from findex.query import QuerySyntaxError
 from findex.ranking import search_page
 from findex.scoring import SCORERS
@@ -33,6 +35,12 @@ app = typer.Typer(add_completion=False, no_args_is_help=True, help="findex — a
 out = Console()  # stdout: data
 err = Console(stderr=True)  # stderr: progress, diagnostics
 log = logging.getLogger("findex")
+
+
+class Exec(StrEnum):
+    serial = "serial"
+    threads = "threads"
+    processes = "processes"
 
 
 class ScorerName(StrEnum):
@@ -84,10 +92,24 @@ def index(
     positions: Annotated[bool, typer.Option(help="Store token positions (phrase queries).")] = True,
     limit: Annotated[int | None, typer.Option(help="Index only the first N documents.")] = None,
     fmt: Annotated[store.Format, typer.Option("--format")] = "binary",
+    workers: Annotated[int, typer.Option(min=1, help="Parallel workers.")] = os.cpu_count() or 1,
+    executor: Annotated[Exec, typer.Option(help="How to parallelise the build.")] = Exec.processes,
 ) -> None:
     """Build an index from a corpus and save it."""
     if not corpus.exists():
         raise _fail(f"corpus not found: {corpus}")
+    if corpus.is_dir() and limit is None:  # map-reduce builder (serial = one chunk)
+        t0 = time.perf_counter()
+        timings = BuildTimings()
+        with err.status(f"indexing with {workers} {executor.value}..."):
+            ix = build_parallel(corpus, workers, executor.value, positions, timings=timings)
+        store.save(ix, out_path, fmt=fmt)
+        size = out_path.stat().st_size / 2**20
+        err.print(
+            f"{ix!r} -> {out_path} ({size:.1f} MiB) in {time.perf_counter() - t0:.1f} s "
+            f"(map {timings.map_s:.1f} s, merge {timings.merge_s:.1f} s)"
+        )
+        return
     total = sum(1 for _ in corpus.rglob("*.txt")) if corpus.is_dir() else None
     if limit is not None and total is not None:
         total = min(total, limit)

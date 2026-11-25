@@ -17,13 +17,13 @@ class Document(NamedTuple):
     text: str
 
 
-def _iter_txt_files(root: Path) -> Iterator[Path]:
+def txt_paths(root: Path) -> Iterator[Path]:
     # sorted() over a lazy rglob materialises only the *paths* (a few KB),
     # never the texts; it makes doc_ids stable between runs.
     yield from sorted(root.rglob("*.txt"))
 
 
-def _read_text(path: Path) -> str:
+def read_text(path: Path) -> str:
     raw = path.read_bytes()
     try:
         return raw.decode("utf-8")
@@ -55,5 +55,5 @@ def iter_documents(root: Path) -> Iterator[Document]:
     if root.is_file() and root.suffix == ".jsonl":
         yield from _iter_jsonl(root, 0)
         return
-    for doc_id, path in enumerate(_iter_txt_files(root)):
-        yield Document(doc_id, str(path.relative_to(root)), _read_text(path))
+    for doc_id, path in enumerate(txt_paths(root)):
+        yield Document(doc_id, str(path.relative_to(root)), read_text(path))

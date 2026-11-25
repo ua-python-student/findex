@@ -172,3 +172,77 @@ findex -vv search ...                 # DEBUG log (@timed, cache hits) on stderr
 │   │       │                                  │ structured concurrency, like :class:`asyncio.TaskGroup`…    │
 └───┴───────┴──────────────────────────────────┴─────────────────────────────────────────────────────────────┘
 ```
+
+## Lab 5 — Concurrency and the GIL: parallel indexing
+
+```bash
+findex index data/ --out index.bin --executor processes --workers 2   # serial | threads | processes
+uv run python scripts/bench_lab05.py .venv/bin/python bench/lab05.jsonl          # GIL build
+uv run python scripts/bench_lab05.py .venv-ft/bin/python bench/lab05_ft.jsonl    # free-threaded 3.13t
+uv run python scripts/report_lab05.py                                            # table + docs/lab05_speedup.png
+```
+
+* `findex.parallel.build_partial(root, paths, start_id, positions)` — module-level (picklable), receives **paths and a doc_id range**, reads its own files, returns a `PartialIndex` of compact `array('I')` buffers (doc_ids, tfs, flattened positions) — arrays pickle as raw bytes, unlike 0.65 M `Posting` objects.
+* `merge(partials)` — sorts partials by `start_id` and concatenates per term: ranges are disjoint and increasing, so concatenation *is* the sorted merge; then materialises `Posting` objects.
+* Serial = `merge([build_partial(root, all_paths, 0)])`. **Tested** to be equal to the Lab 4 builder, and the threads/processes indexes equal it too (`tests/test_parallel.py`); on the full corpus the three `index.bin` files are **byte-identical** (`cmp`).
+* `--executor {serial,threads,processes} --workers N`; the pool is `ProcessPoolExecutor(mp_context=get_context("spawn"))`; benchmark scripts launch under `if __name__ == "__main__"`. A worker exception is re-raised by `fut.result()` in the parent with the worker's traceback attached, remaining futures are cancelled (tested with a monkeypatched `read_text` that raises).
+* Default: `--executor processes --workers os.cpu_count()` — it wins on this machine.
+
+**Machine:** Intel Xeon @ 2.10 GHz, **2 vCPUs** (`os.cpu_count() == 2`), 7.8 GB RAM, Linux; CPython 3.13.18 and 3.13.14t (free-threaded, `uv python install 3.13t`, `sys._is_gil_enabled() == False`). Full corpus with positions, 4 chunks per worker, each configuration: 1 warm-up + 3 measured runs in fresh processes; wall = `perf_counter`, CPU = user+sys of the process **and its children** (`getrusage`), RSS = parent's `ru_maxrss`.
+
+| Python | Executor | Workers | Wall (s, median) | spread | CPU (s) | Peak RSS (MiB) | Merge (s) | Speedup vs 3.13 serial |
+|---|---|---|---|---|---|---|---|---|
+| 3.13 | serial | 1 | 4.50 | ±0.11 | 4.50 | 278 | 1.06 | 1.00× |
+| 3.13 | threads | 1 | 4.61 | ±0.22 | 4.61 | 292 | 1.16 | 0.98× |
+| 3.13 | threads | 2 | 4.68 | ±0.06 | 5.02 | 302 | 1.19 | 0.96× |
+| 3.13 | threads | 4 | 4.86 | ±0.07 | 5.24 | 319 | 1.17 | 0.93× |
+| 3.13 | threads | 8 | 5.17 | ±0.08 | 5.52 | 344 | 1.26 | 0.87× |
+| 3.13 | processes | 1 | 5.32 | ±0.20 | 5.50 | 312 | 1.30 | 0.85× |
+| 3.13 | processes | 2 | 3.75 | ±0.14 | 5.82 | 314 | 1.26 | 1.20× |
+| 3.13 | processes | 4 | 4.09 | ±0.18 | 6.24 | 322 | 1.51 | 1.10× |
+| 3.13 | processes | 8 | 4.77 | ±0.11 | 7.44 | 340 | 1.64 | 0.94× |
+| 3.13t (GIL off) | serial | 1 | 5.88 | ±0.22 | 5.86 | 339 | 1.46 | 0.76× |
+| 3.13t (GIL off) | threads | 1 | 5.66 | ±0.49 | 5.67 | 355 | 1.47 | 0.79× |
+| 3.13t (GIL off) | threads | 2 | 4.01 | ±0.19 | 6.14 | 369 | 1.39 | 1.12× |
+| 3.13t (GIL off) | threads | 4 | 4.71 | ±0.20 | 7.20 | 389 | 1.56 | 0.95× |
+| 3.13t (GIL off) | threads | 8 | 4.40 | ±0.30 | 6.84 | 415 | 1.43 | 1.02× |
+| 3.13t (GIL off) | processes | 1 | 6.95 | ±0.37 | 7.11 | 369 | 1.59 | 0.65× |
+| 3.13t (GIL off) | processes | 2 | 4.54 | ±0.18 | 6.94 | 375 | 1.55 | 0.99× |
+| 3.13t (GIL off) | processes | 4 | 5.32 | ±0.19 | 8.44 | 387 | 1.59 | 0.85× |
+| 3.13t (GIL off) | processes | 8 | 5.63 | ±0.34 | 9.18 | 403 | 1.60 | 0.80× |
+
+![speedup](docs/lab05_speedup.png)
+
+### Why the numbers look like this
+
+**Threads under the GIL did not speed anything up (0.96× at 2, 0.87× at 8).** Tokenising (regex), counting (dict updates) and building arrays are Python bytecode, and a thread must hold the GIL to execute bytecode. With 2 threads, one runs while the other waits for the lock; every 5 ms (`sys.getswitchinterval()`) the holder is asked to drop it and the threads trade places. Total work is unchanged, but switching, contention and cache misses are added — so CPU time grows (4.50 → 5.52 s) and wall time grows with more threads. Only file reads release the GIL, and the corpus is in the page cache, so there is almost nothing to overlap.
+
+**Processes did speed up (1.20× at 2 workers), and here is what it cost.** Each process has its own interpreter and its own GIL, so two chunks really are tokenised at the same time on the two cores. The price: (1) *startup* — `spawn` starts a new interpreter and re-imports `findex` in each worker; one worker in a pool is 0.8 s slower than serial (5.32 vs 4.50 s); (2) *the pickling tax* — every partial index is pickled in the worker, sent over a pipe and unpickled in the parent; (3) *coordination* — at 2 workers CPU is 5.82 s for 3.75 s wall: ~1.3 s of extra CPU is spent on startup, pickling and merging partial results that the serial build never does. More workers than cores (4, 8) only add these costs: 8 processes are slower than serial. RSS of the parent grows modestly (278 → 314 MiB) because it holds the unpickled partials and the merged index at the same time.
+
+**Amdahl's law.** The merge is sequential and takes ~1.1–1.3 s of the 4.5 s serial build (≈ 24 %; it materialises 650 K `Posting` objects in the parent). With p = 0.76 parallelisable, the ceiling is 1/(0.24 + 0.76/2) = **1.6× on 2 cores** and 1/0.24 ≈ **4.2× on infinite cores**. We got 1.20× on 2 cores — the gap to 1.6× is the process tax above. To raise the ceiling, the merge itself must get cheaper (keep arrays instead of `Posting` objects — that is what Lab 8 does with NumPy).
+
+**Free-threaded 3.13t.** The same `ThreadPoolExecutor` code now scales: threads ×2 = **1.47×** over the 3.13t serial run, because both threads execute bytecode in parallel. Two caveats are visible in the table: the single-thread overhead of the free-threaded build is large on this workload (serial 5.88 s vs 4.50 s — ~30 %, more than the 5–10 % usually quoted; dict-heavy code pays for per-object locking and the disabled specialisations of 3.13t), so in absolute terms 3.13t threads (4.01 s) are only slightly faster than 3.13 processes (3.75 s); and processes are the slowest option on 3.13t.
+
+**The bug the GIL was hiding.** `build_partial` shares nothing, so the indexer had no race. To check the claim, `scripts/experiments/lab05_race.py` has 4 threads do `shared[key] += 1` on one `Counter` 200 000 times each:
+
+```text
+python 3.13.18 GIL=True:  unsafe total=800,000 expected=800,000 lost=0
+python 3.13.14 GIL=False: unsafe total=791,325 expected=800,000 lost=8,675
+python 3.13.14 GIL=False: safe   total=800,000 expected=800,000 lost=0
+```
+
+`+=` is three steps (`BINARY_SUBSCR`/load, `BINARY_OP +=`, `STORE_SUBSCR`). With the GIL, a switch between them is rare enough that this run lost nothing — the code is still *incorrect*, just lucky. Without the GIL two threads read the same old value at the same time and one increment is overwritten: 8,675 updates lost. Fix: a `threading.Lock` around the update (`safe`), or — what `findex` does — no shared mutable state at all: each worker returns its own partial result and only the parent merges.
+
+### Counter-benchmark: where threads *do* scale (I/O-bound)
+
+50 HTTP GETs to a local server that answers after 100 ms (`scripts/experiments/lab05_io.py`), `ThreadPoolExecutor`, GIL build:
+
+| Threads | 50 requests, wall (s) | Speedup |
+|---|---|---|
+| 1 | 5.11 | 1.0× |
+| 5 | 1.03 | 5.0× |
+| 10 | 0.54 | 9.5× |
+| 25 | 0.23 | 22.3× |
+| 50 | 0.14 | 35.8× |
+
+Waiting on a socket releases the GIL, so the waits overlap: 50 threads are 36× faster on 2 cores. (First attempt showed 25 threads *slower* than 10: `http.server`'s default listen backlog is 5, extra connections were dropped and retried after 1 s — fixed with `request_queue_size = 128`.) Same API, opposite result: threads for waiting, processes (or no-GIL) for computing.
