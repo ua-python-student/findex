@@ -194,3 +194,70 @@ def stats(
         for i, (t, n) in enumerate(cf.most_common(top), 1):
             terms.add_row(str(i), t, f"{n:,}", f"{ix.df(t):,}")
         out.print(terms)
+
+
+@app.command()
+def crawl(
+    seeds: Annotated[list[str], typer.Argument(help="Seed URL(s).")],
+    max_pages: Annotated[int, typer.Option(min=1)] = 500,
+    concurrency: Annotated[int, typer.Option(min=1, max=200)] = 10,
+    per_host: Annotated[int, typer.Option(min=1, help="Max requests in flight per host.")] = 2,
+    delay: Annotated[float, typer.Option(min=0, help="Min seconds between requests to one host.")] = 0.1,
+    allow_domain: Annotated[
+        list[str] | None, typer.Option(help="Allowed domains (default: seed hosts).")
+    ] = None,
+    out_path: Annotated[Path, typer.Option("--out", "-o")] = Path("data/crawl.jsonl"),
+    log_path: Annotated[Path, typer.Option("--log")] = Path("crawl.log"),
+    debug: Annotated[
+        bool, typer.Option(help="asyncio debug mode: warns about callbacks blocking the loop.")
+    ] = False,
+) -> None:
+    """Crawl politely; stream pages to JSON lines that `findex index` can read."""
+    import asyncio
+
+    from rich.live import Live
+
+    from findex.crawler import CrawlStats
+    from findex.crawler import crawl as crawl_pages
+
+    stats = CrawlStats()
+
+    def render() -> Table:
+        t = Table(title="findex crawl", show_header=False)
+        t.add_row("pages", f"{stats.pages:,} / {max_pages:,}")
+        t.add_row("pages/s", f"{stats.pages_per_s:.1f}")
+        t.add_row("in flight", str(stats.in_flight))
+        t.add_row("queue", f"{stats.queued:,}")
+        t.add_row("errors / retries", f"{stats.errors} / {stats.retries}")
+        t.add_row("robots.txt blocked", str(stats.robots_blocked))
+        return t
+
+    async def run() -> None:
+        with out_path.open("w", encoding="utf-8") as out_f, log_path.open("w", encoding="utf-8") as log_f:
+            log_f.write("time\tstatus\tbytes\telapsed\tattempts\turl\terror\n")
+            with Live(render(), console=err, refresh_per_second=4) as live:
+                async for page in crawl_pages(
+                    seeds,
+                    max_pages=max_pages,
+                    concurrency=concurrency,
+                    per_host=per_host,
+                    per_host_delay=delay,
+                    allowed_domains=allow_domain or (),
+                    log_file=log_f,
+                    stats=stats,
+                ):
+                    rec = {
+                        "url": page.url,
+                        "title": page.title,
+                        "text": page.text,
+                        "fetched_at": page.fetched_at,
+                    }
+                    out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")  # streamed, never buffered
+                    live.update(render())
+                live.update(render())
+
+    asyncio.run(run(), debug=debug)
+    err.print(
+        f"{stats.pages} pages in {stats.elapsed:.1f} s ({stats.pages_per_s:.1f}/s), {stats.errors} errors, "
+        f"{stats.retries} retries -> {out_path}; per-URL log: {log_path}"
+    )

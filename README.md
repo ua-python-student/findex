@@ -246,3 +246,56 @@ python 3.13.14 GIL=False: safe   total=800,000 expected=800,000 lost=0
 | 50 | 0.14 | 35.8× |
 
 Waiting on a socket releases the GIL, so the waits overlap: 50 threads are 36× faster on 2 cores. (First attempt showed 25 threads *slower* than 10: `http.server`'s default listen backlog is 5, extra connections were dropped and retried after 1 s — fixed with `request_queue_size = 128`.) Same API, opposite result: threads for waiting, processes (or no-GIL) for computing.
+
+## Lab 6 — The async crawler
+
+```bash
+uv run python scripts/mirror_server.py --port 8765          # the local mirror (see "Ethics")
+findex -v crawl http://127.0.0.1:8765/ --max-pages 300 --concurrency 20 --per-host 2 --delay 0.1 \
+    --allow-domain 127.0.0.1 --allow-domain 127.0.0.2 --allow-domain 127.0.0.3 --out data/crawl.jsonl --debug
+findex index data/crawl.jsonl --out crawl.bin && findex search crawl.bin '"event loop"'
+uv run python scripts/bench_lab06.py                        # the table below
+```
+
+**Ethics / permission.** The crawler was run **only against a local mirror** that I generated from my own corpus (`scripts/mirror_server.py`): 1,668 pages on three loopback "hosts" (127.0.0.1 = Python docs, 127.0.0.2 = Django, 127.0.0.3 = NumPy), with 50–200 ms random latency per response and deliberate misbehaviour (every 50th request → 429 with `Retry-After: 1`, every 70th → 503, a `/loop/a ↔ /loop/b` redirect loop, a 404, `/private/` disallowed in `robots.txt`, links to an external site and URL variants that differ only by fragment, slash or query order). No third-party site was crawled. The crawler sends `User-Agent: findex-crawler/0.6 (+https://github.com/<user>/findex; student project)`, obeys `robots.txt`, limits requests per host and stays inside the domain allowlist.
+
+* `crawler/fetch.py` — `fetch(client, url)`: `asyncio.timeout` per attempt; retries **only** 429, 5xx, timeouts and transport errors, at most 3 times, with exponential backoff + jitter (`min(cap, 0.5·2^n) + U(0, 0.5)`); a 429's `Retry-After` (seconds or HTTP date) replaces the backoff; other 4xx are never retried; redirect loops (`TooManyRedirects`) are recorded, not retried. Returns `FetchResult(url, status, final_url, content_type, text, nbytes, elapsed, attempts, error)`.
+* `crawler/robots.py` — `RobotsCache`: one `robots.txt` request per host (an `asyncio.Lock` per origin, so 20 workers do not fetch it 20 times — tested); 4xx → allow all, 5xx/unreachable → disallow all.
+* `crawler/urls.py` — canonicalisation: absolute URL, lowercase scheme and host, default port dropped, `//` collapsed, fragment removed, trailing slash removed (except `/`), query parameters sorted.
+* `crawler/crawl.py` — `crawl(seeds, ...) -> AsyncIterator[Page]`: an `asyncio.Queue` frontier; `concurrency` workers in an `asyncio.TaskGroup`; a global `Semaphore(concurrency)`, a `Semaphore(per_host)` per host and a per-host minimum delay (`asyncio.sleep`, the slot is reserved before sleeping); a `seen` set of canonical URLs (redirect targets included); HTML parsed with selectolax (lexbor): title, text without `<script>/<style>`, links. When `max_pages` is reached, a `stop` event wakes the supervisor, which cancels the workers (they get `CancelledError` at their current `await`), the `async with` closes the `httpx.AsyncClient` (one client and connection pool for the whole crawl). Pages are handed to the consumer through a bounded queue (backpressure).
+* `findex crawl` writes **one JSON line per page as it arrives** (`url, title, text, fetched_at`), so `iter_documents` (Lab 1) reads it and `findex index data/crawl.jsonl` indexes it — outside the event loop. A `rich.Live` panel on stderr shows pages, pages/s, in-flight, queue depth, errors/retries, robots blocks. `crawl.log` has one TSV line per URL (`time, status, bytes, elapsed, attempts, url, error`); a sample is in `docs/crawl.sample.log`.
+* Tests (`tests/test_crawler.py`, 17 tests): `httpx.MockTransport` only — retries and backoff (with an injected fake `sleep`), `Retry-After`, 404 not retried, give-up after 3, timeouts, connection errors, robots cache fetched once, a whole mini-site crawl: no URL fetched twice, allowlist respected, robots honoured, 404 logged, `max_pages` respected, no script text. They run with `asyncio.run(..., debug=True)`.
+* `--debug` runs the loop with `asyncio.run(debug=True)`: on the 300-page crawl below **no "Executing … took" warning** appeared, i.e. no callback blocked the loop for > 100 ms.
+
+### Benchmark (local mirror, same seed, 300 pages, fresh process per run)
+
+| Concurrency | Per-host limit | Per-host delay (s) | Pages | Wall (s) | Pages/s | Errors | Retries | Peak RSS (MiB) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 2 | 0.1 | 300 | 50.4 | 6.0 | 2 | 8 | 48 |
+| 5 | 2 | 0.1 | 300 | 34.0 | 8.8 | 2 | 11 | 49 |
+| 20 | 2 | 0.1 | 300 | 25.6 | 11.7 | 6 | 10 | 50 |
+| 20 | 20 | 0.0 | 300 | 2.7 | 110.1 | 2 | 5 | 49 |
+
+### Explanation
+
+**Why 20 concurrent requests in one thread beat the Lab 5 approach here.** A fetch is ~125 ms of *waiting* for a response and well under 1 ms of CPU (parse + link extraction with a C parser). While one coroutine waits on its socket it is suspended at `await`, and the event loop runs the others; with no politeness limits, 20 in-flight requests give **110 pages/s vs 6 pages/s** sequentially (18×) on one thread — and peak RSS stays ~49 MiB at any concurrency, because a waiting coroutine costs a few KB, not a thread stack. Lab 5's indexer was the opposite workload: all CPU and no waiting, so there was nothing to overlap and only extra cores could help.
+
+**What the per-host limits cost, and why I kept them.** With `--per-host 2 --delay 0.1` the same 20 workers make only 11.7 pages/s: each host gets at most 2 requests in flight and one new request per 100 ms, i.e. ≤ 10 pages/s per host, ≤ 30 for all three — and the frontier is filled breadth-first, mostly with pages of the first host, so workers queue up at that host's gate while other hosts are idle (head-of-line blocking; per-host frontier queues would fix it). That is a 9× slowdown, and it is the point: unbounded concurrency would be a denial-of-service attack on a real site. The real crawler keeps the limits; the 20/20/0 row exists only because the server is mine.
+
+**Where the loop would have blocked.** If each page were tokenised and indexed inside the worker coroutine (Lab 4's `build_index` is ~3 ms of pure Python per average document, much more for large ones), every other coroutine would be frozen during that time — 20 workers would effectively run one after another and `debug=True` would print "Executing … took 0.2 seconds" for the big documents. So the crawler only writes JSON lines; `findex index` runs afterwards, separately (or, if indexing during the crawl were required, in a `ProcessPoolExecutor` via `loop.run_in_executor`).
+
+**A handled failure (from `crawl.log` and the `-v` log).** The 429 from the mirror, honoured via `Retry-After`:
+
+```text
+INFO findex.crawler.fetch: retry 1/3 for http://127.0.0.1:8765/sections/distributing after HTTP 429, sleeping 1.00 s
+2026-11-25T14:51:20.277+00:00	200	142	1288ms	2	http://127.0.0.1:8765/sections/distributing
+```
+
+and a 503 with exponential backoff + jitter, then the redirect loop that is recorded and not retried:
+
+```text
+INFO findex.crawler.fetch: retry 1/3 for http://127.0.0.1:8765/ after HTTP 503, sleeping 0.69 s
+2026-11-25T14:51:18.585+00:00	200	1070	1029ms	2	http://127.0.0.1:8765/
+2026-11-25T14:51:21.284+00:00	0	0	925ms	1	http://127.0.0.1:8765/loop/a	redirect loop
+2026-11-25T14:51:18.590+00:00	0	0	0ms	0	http://127.0.0.1:8765/private/secret.html	disallowed by robots.txt
+```
