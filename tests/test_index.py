@@ -45,7 +45,8 @@ def test_boolean_query() -> None:
 def test_store_round_trip(tmp_path: Path) -> None:
     for positions in (False, True):
         ix = build_index(DOCS, positions=positions)
-        for fmt in ("pickle", "binary"):
+        formats: tuple[store.Format, ...] = ("pickle", "binary")
+        for fmt in formats:
             p = tmp_path / f"{fmt}{positions}"
-            store.save(ix, p, fmt=fmt)  # type: ignore[arg-type]
+            store.save(ix, p, fmt=fmt)
             assert store.load(p) == ix

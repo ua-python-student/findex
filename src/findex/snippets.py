@@ -24,7 +24,7 @@ def snippet(text: str, terms: Iterable[str], width: int = 80, mark: tuple[str, s
     for m in matches:
         while matches[j].start() < m.start() - width:
             j += 1
-        window = set()
+        window: set[str] = set()
         for x in islice(matches, j, None):
             if x.start() > m.start() + width:
                 break

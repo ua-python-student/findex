@@ -17,10 +17,10 @@ import json
 import pickle
 import struct
 from array import array
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict, cast
 
 from findex.index import Index
 from findex.models import DocMeta, Posting
@@ -28,6 +28,13 @@ from findex.timing import timed
 
 MAGIC = b"FIDX1\n"
 Format = Literal["pickle", "binary"]
+
+
+class Header(TypedDict):
+    terms: dict[str, list[int]]  # term -> [offset, n_postings, has_positions]
+    doc_lengths: dict[str, int]  # JSON object keys are always strings
+    doc_meta: dict[str, list[str]]  # doc_id -> [path, title]
+    texts: dict[str, list[int]]  # doc_id -> [offset, length]
 
 
 def save(index: Index, path: Path, fmt: Format = "binary") -> None:
@@ -45,7 +52,7 @@ def load(path: Path) -> Index:
 
 
 @contextmanager
-def open_index(path: Path) -> Iterator[Index]:
+def open_index(path: Path) -> Generator[Index]:
     """``with open_index(p) as ix:`` — load, and release the index even if the body raises."""
     index = load(path)
     try:
@@ -109,12 +116,13 @@ def save_binary(index: Index, path: Path) -> None:
         f.write(blob)
 
 
-def read_header(path: Path) -> tuple[dict[str, object], int]:
+def read_header(path: Path) -> tuple[Header, int]:
     with open(path, "rb") as f:
         if f.read(len(MAGIC)) != MAGIC:
             raise ValueError(f"{path}: not a findex binary index")
         (n,) = struct.unpack("<Q", f.read(8))
-        header = json.loads(f.read(n))
+        # cast: json.loads returns Any; the layout is ours (save_binary), not external input
+        header = cast(Header, json.loads(f.read(n)))
     return header, len(MAGIC) + 8 + n
 
 
@@ -122,7 +130,7 @@ def load_binary(path: Path) -> Index:
     header, data_start = read_header(path)
     data = memoryview(Path(path).read_bytes())[data_start:]
     postings: dict[str, list[Posting]] = {}
-    terms: dict[str, list[int]] = header["terms"]  # type: ignore[assignment]
+    terms = header["terms"]
     for term, (off, n, has_pos) in terms.items():
         ids = array("I")
         ids.frombytes(data[off : off + 4 * n])
@@ -131,16 +139,17 @@ def load_binary(path: Path) -> Index:
         if has_pos:
             pos = array("I")
             pos.frombytes(data[off + 8 * n : off + 8 * n + 4 * sum(tfs)])
-            plist, k = [], 0
+            plist: list[Posting] = []
+            k = 0
             for d, tf in zip(ids, tfs, strict=True):
                 plist.append(Posting(d, tf, tuple(pos[k : k + tf])))
                 k += tf
             postings[term] = plist
         else:
             postings[term] = [Posting(d, tf) for d, tf in zip(ids, tfs, strict=True)]
-    lengths: dict[str, int] = header["doc_lengths"]  # type: ignore[assignment]
-    meta: dict[str, list[str]] = header["doc_meta"]  # type: ignore[assignment]
-    text_ranges: dict[str, list[int]] = header.get("texts", {})  # type: ignore[assignment]
+    lengths = header["doc_lengths"]
+    meta = header["doc_meta"]
+    text_ranges = header.get("texts", {})
     return Index(
         postings,
         {int(d): n for d, n in lengths.items()},  # JSON turned int keys into strings

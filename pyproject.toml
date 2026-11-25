@@ -1,13 +1,19 @@
 [project]
 name = "findex"
-version = "0.1.0"
+version = "0.4.0"
 description = "findex — a search engine built from scratch"
 readme = "README.md"
 authors = [
     { name = "Student", email = "student@example.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "rich>=15.0.0",
+    "typer>=0.29.2",
+]
+
+[project.scripts]
+findex = "findex.cli:app"
 
 [build-system]
 requires = ["uv_build>=0.11.32,<0.12.0"]
@@ -15,7 +21,10 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.170.17",
+    "pyright>=1.1.414",
     "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.6",
 ]
 
@@ -27,4 +36,19 @@ target-version = "py313"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]
 "scripts/**" = ["B023", "F821", "E501", "E702", "E701", "E741"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+pythonVersion = "3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: takes more than a second (deselect with -m 'not slow')"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["findex"]
+branch = true

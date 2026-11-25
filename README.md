@@ -1,5 +1,7 @@
 # findex — a search engine built from scratch in Python
 
+[![CI](https://github.com/<user>/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/findex/actions/workflows/ci.yml)
+
 Semester project for the course *Python — Build a Search Engine*. One lab = one language feature + one project step.
 
 ## Corpus
@@ -140,3 +142,33 @@ On the second run `rank` is not called at all (no `rank took` line). What remain
 | | **mean** | | **0.36** | **0.36** |
 
 With only 1–5 relevant documents per query the maximum P@5 is often 0.2–0.6, so the means are small by construction (the ceiling for this set is 0.54). The two scorers tie on average: BM25 wins on *django database migrations* (TF-IDF pulls in the very long release notes that mention "database" hundreds of times; length normalisation pushes them down), TF-IDF wins on *free threading GIL*, where the relevant documents are the long *What's New in 3.13/3.14* pages that BM25 penalises for length. Ten queries is noise-level evidence; the habit of measuring is the point.
+
+## Lab 4 — A real tool: typing, tests, packaging, CLI
+
+```bash
+uv tool install .                     # or: uv tool install dist/findex-0.4.0-py3-none-any.whl
+findex index data/ --out index.bin    # rich progress bar on stderr
+findex search index.bin 'asyncio (TaskGroup OR gather) "structured concurrency"' -k 3
+findex search index.bin 'dataclass frozen' --json | jq .path
+findex stats index.bin --top 20
+findex -vv search ...                 # DEBUG log (@timed, cache hits) on stderr
+```
+
+* **Typing.** `[tool.pyright] typeCheckingMode = "strict"` over `src/` and `tests/`: **0 errors**. Generators return `Iterator[...]`, functions accept `Iterable[...]`; `Scorer` is a `typing.Protocol`; `@timed` is generic with PEP 695 `[**P, R]`; `type Ranked = ...` alias; `Literal["pickle", "binary"]` for formats; the binary header is a `TypedDict`. Strict mode found a real bug: `Scorer.name` was declared as a writable attribute, but the frozen dataclasses only provide a read-only one — the protocol now declares it as a `@property`. One `# type: ignore` remains (`__hash__ = None` on `Index`, with the reason in the comment); `json.loads` output goes through one documented `cast`.
+* **Tests.** 47 pytest tests (`uv run pytest`): parametrized tokenizer table (Cyrillic, combining marks, `ß`), a session-scoped corpus fixture in `conftest.py`, merges, parser trees, both scorers with the three Lab 3 sanity checks, store round trip, `open_index` cleanup on exception, CLI through `typer.testing.CliRunner` (table, `--json`, exit codes 1/2, no traceback). **Hypothesis properties** (`tests/test_properties.py`): merges equal set operations for any sorted lists; `tokenize` is idempotent and never yields empty tokens; `load(save(index)) == index` for generated corpora in both formats, with sorted postings; `parse(str(tree)) == tree` for generated query trees. One test is marked `slow` (indexes 200 real documents).
+* **Coverage: 83 %** (branch coverage). Not covered on purpose: the old `python -m findex.index/search/stats` argparse entry points from Labs 1–3 (kept for the earlier labs' instructions; the `findex` CLI replaces them) and `Index.close()` paths only reached through the CLI.
+* **Packaging.** PEP 621 `pyproject.toml`, `uv.lock` committed, `src/` layout, `[project.scripts] findex = "findex.cli:app"`, version 0.4.0. `uv build` → `dist/findex-0.4.0-py3-none-any.whl`; installed into a clean tool environment with `uv tool install <wheel>` → `findex --help` and `findex --version` work (the installer writes a `bin/findex` script that imports `findex.cli:app`).
+* **Logging.** `log = logging.getLogger(__name__)` in modules; configured once in the CLI callback (`-v` INFO, `-vv` DEBUG) with a `RichHandler` on **stderr**; data (tables, JSON lines) on stdout. Expected errors print one line and exit non-zero: missing index → 1, bad query syntax → 2.
+* **CI.** `.github/workflows/ci.yml`: `uv sync --locked`, `ruff check`, `ruff format --check`, `pyright`, `pytest` on every push/PR, on 3.13 and free-threaded 3.13t.
+* **Release.** `git tag v0.4.0 && gh release create v0.4.0 dist/findex-0.4.0-py3-none-any.whl` — then anyone can `uv tool install https://github.com/<user>/findex/releases/download/v0.4.0/findex-0.4.0-py3-none-any.whl`.
+
+```text
+         'asyncio (TaskGroup OR gather) "structured concurrency"': 1 matches, top 1 by bm25 (2.6 ms)
+┏━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ # ┃ score ┃ document                         ┃ snippet                                                     ┃
+┡━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ 1 │ 33.88 │ Coroutines and tasks             │ …classes :exc:`BaseException` so most code will not need to │
+│   │       │ cpython/library/asyncio-task.txt │ be aware of it. The asyncio components that enable          │
+│   │       │                                  │ structured concurrency, like :class:`asyncio.TaskGroup`…    │
+└───┴───────┴──────────────────────────────────┴─────────────────────────────────────────────────────────────┘
+```

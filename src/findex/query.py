@@ -80,7 +80,7 @@ class Phrase(Node):
             docs = merge_and(docs, [p.doc_id for p in plist])
         # 2) positions: word i must appear at p + i
         by_doc = [{p.doc_id: p.positions for p in plist} for plist in lists]
-        out = []
+        out: list[int] = []
         for d in docs:
             first, *rest = (by_doc[i][d] for i in range(len(self.words)))
             rest_sets = [set(r) for r in rest]
@@ -146,7 +146,7 @@ _LEX = re.compile(r'\s*(?:(?P<phrase>"[^"]*")|(?P<paren>[()])|(?P<word>[^\s()"]+
 
 
 def _lex(text: str) -> list[str]:
-    pos, out = 0, []
+    pos, out = 0, list[str]()
     text = text.strip()
     while pos < len(text):
         m = _LEX.match(text, pos)
@@ -213,11 +213,11 @@ class _Parser:
             return node
         if tok == ")":
             raise QuerySyntaxError("unbalanced ')'")
-        words = tuple(tokenize(tok.strip('"')))
+        words = list(tokenize(tok.strip('"')))
         if not words:
             return None  # pure punctuation: ignore
-        if tok.startswith('"') or len(words) > 1:
-            return Phrase(words) if len(words) > 1 else Term(words[0])
+        if len(words) > 1:  # "a phrase", or a word the tokenizer splits (built-in)
+            return Phrase(tuple(words))
         return Term(words[0])
 
 

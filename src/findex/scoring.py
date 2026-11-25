@@ -15,7 +15,8 @@ if TYPE_CHECKING:
 class Scorer(Protocol):
     """Structural interface: no inheritance needed to satisfy it."""
 
-    name: str
+    @property
+    def name(self) -> str: ...  # read-only: frozen dataclasses satisfy it
 
     def score(self, term: str, posting: Posting, index: Index) -> float: ...
 

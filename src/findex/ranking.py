@@ -6,8 +6,8 @@ import functools
 import heapq
 import logging
 from collections import defaultdict
-from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Protocol
 
 from findex.index import Index
 from findex.query import parse
@@ -50,9 +50,17 @@ def rank(index: Index, query: str, scorer: Scorer, k: int) -> Ranked:
     return len(matched), tuple(top)
 
 
-def _ranker(index: Index) -> Callable[[str, Scorer, int], Ranked]:
+class CachedRanker(Protocol):
+    """What functools.lru_cache returns, as far as we use it."""
+
+    def __call__(self, query: str, scorer: Scorer, k: int, /) -> Ranked: ...
+
+    def cache_info(self) -> tuple[int, int, int | None, int]: ...  # (hits, misses, maxsize, currsize)
+
+
+def _ranker(index: Index) -> CachedRanker:
     """A per-index lru_cache: the cache key is (query, scorer, k) — all hashable."""
-    fn = index.__dict__.get("_ranker")
+    fn: CachedRanker | None = index.__dict__.get("_ranker")
     if fn is None:
 
         @functools.lru_cache(maxsize=256)
@@ -74,12 +82,12 @@ def search_page(
 ) -> tuple[int, list[SearchResult]]:
     scorer = scorer or BM25()
     ranker = _ranker(index)
-    hits_before = ranker.cache_info().hits  # type: ignore[attr-defined]
+    hits_before = ranker.cache_info()[0]
     total, top = ranker(query, scorer, k + offset)
-    if ranker.cache_info().hits > hits_before:  # type: ignore[attr-defined]
+    if ranker.cache_info()[0] > hits_before:
         log.debug("cache hit for %r (%s, k=%d)", query, scorer.name, k + offset)
     terms = list(parse(query).terms()) if with_snippets else []
-    results = []
+    results: list[SearchResult] = []
     for doc_id, score in top[offset:]:
         meta = index.doc_meta[doc_id]
         snip = snippet(index.doc_text(doc_id), terms) if with_snippets else ""
