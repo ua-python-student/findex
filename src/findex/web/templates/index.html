@@ -5,10 +5,15 @@
   <input type="search" name="q" value="{{ q }}" placeholder='asyncio (TaskGroup OR gather) "event loop"'
          autofocus autocomplete="off" aria-label="query"
          hx-get="/" hx-trigger="keyup changed delay:300ms, search" hx-target="#results" hx-push-url="true"
-         hx-include="[name=scorer]">
+         hx-include="[name=scorer],[name=mode]">
   <select name="scorer" aria-label="ranking">
     <option value="bm25" {{ 'selected' if scorer == 'bm25' }}>BM25</option>
     <option value="tfidf" {{ 'selected' if scorer == 'tfidf' }}>TF-IDF</option>
+  </select>
+  <select name="mode" aria-label="mode" {{ '' if has_sem else 'disabled title="run findex embed to enable"' }}>
+    <option value="keyword" {{ 'selected' if mode == 'keyword' }}>keyword</option>
+    <option value="semantic" {{ 'selected' if mode == 'semantic' }}>semantic</option>
+    <option value="hybrid" {{ 'selected' if mode == 'hybrid' }}>hybrid</option>
   </select>
   <button type="submit">Search</button>
 </form>

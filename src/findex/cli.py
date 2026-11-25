@@ -25,11 +25,13 @@ from rich.table import Table
 
 from findex import __version__, store
 from findex.corpus import Document, iter_documents
+from findex.fast import NumpyIndex
 from findex.index import build_index
 from findex.parallel import BuildTimings, build_parallel
 from findex.query import QuerySyntaxError
 from findex.ranking import search_page
 from findex.scoring import SCORERS
+from findex.semantic import SemanticIndex, build_embeddings, emb_dir
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="findex — a small search engine.")
 out = Console()  # stdout: data
@@ -41,6 +43,17 @@ class Exec(StrEnum):
     serial = "serial"
     threads = "threads"
     processes = "processes"
+
+
+class Mode(StrEnum):
+    keyword = "keyword"
+    semantic = "semantic"
+    hybrid = "hybrid"
+
+
+class Engine(StrEnum):
+    numpy = "numpy"
+    python = "python"
 
 
 class ScorerName(StrEnum):
@@ -136,14 +149,28 @@ def search_cmd(
     k: Annotated[int, typer.Option("--k", "-k", min=1, max=1000)] = 10,
     scorer: Annotated[ScorerName, typer.Option()] = ScorerName.bm25,
     as_json: Annotated[bool, typer.Option("--json", help="JSON lines on stdout.")] = False,
+    mode: Annotated[
+        Mode, typer.Option(help="keyword (BM25), semantic (embeddings) or hybrid (RRF).")
+    ] = Mode.keyword,
+    engine: Annotated[Engine, typer.Option(help="Keyword scorer implementation.")] = Engine.numpy,
 ) -> None:
     """Ranked search: AND/OR/NOT, parentheses, "phrases"."""
     if not index_path.exists():
         raise _fail(f"index file not found: {index_path} (run `findex index` first)")
     try:
         with store.open_index(index_path) as ix:
+            nx = (
+                NumpyIndex.open(index_path)
+                if engine is Engine.numpy and store.is_binary(index_path)
+                else None
+            )
+            sem = None
+            if mode is not Mode.keyword:
+                if not emb_dir(index_path).exists():
+                    raise _fail(f"no embeddings for {index_path}: run `findex embed {index_path}` first")
+                sem = SemanticIndex.open(index_path, ix.num_docs)
             t0 = time.perf_counter()
-            total, results = search_page(ix, query, SCORERS[scorer.value], k)
+            total, results = search_page(ix, query, SCORERS[scorer.value], k, mode=mode.value, nx=nx, sem=sem)
             took = (time.perf_counter() - t0) * 1000
     except QuerySyntaxError as e:
         raise _fail(f"bad query: {e}", code=2) from None
@@ -161,7 +188,8 @@ def search_cmd(
             }
             sys.stdout.write(json.dumps(rec, ensure_ascii=False) + "\n")
         return
-    table = Table(title=f"{query!r}: {total} matches, top {len(results)} by {scorer.value} ({took:.1f} ms)")
+    label = scorer.value if mode is Mode.keyword else mode.value
+    table = Table(title=f"{query!r}: {total} matches, top {len(results)} by {label} ({took:.1f} ms)")
     table.add_column("#", justify="right")
     table.add_column("score", justify="right")
     table.add_column("document", overflow="fold", max_width=40)
@@ -284,4 +312,28 @@ def serve(
         log_level=level,
         proxy_headers=True,
         backlog=2048,
+    )
+
+
+@app.command()
+def embed(
+    index_path: Annotated[Path, typer.Argument(metavar="INDEX")],
+    model: Annotated[
+        str, typer.Option(help="'lsa' (no download) or a sentence-transformers model name.")
+    ] = "lsa",
+) -> None:
+    """Chunk every document, embed the chunks, save <INDEX>.emb/ for semantic and hybrid search."""
+    if not index_path.exists():
+        raise _fail(f"index file not found: {index_path}")
+    columns = (TextColumn("embedding"), BarColumn(), MofNCompleteColumn(), TimeElapsedColumn())
+    with store.open_index(index_path) as ix, Progress(*columns, console=err, transient=True) as progress:
+        task = progress.add_task("embed", total=None)
+        t0 = time.perf_counter()
+        out = build_embeddings(
+            ix, index_path, model, lambda done, total: progress.update(task, completed=done, total=total)
+        )
+    meta = json.loads((out / "meta.json").read_text())
+    err.print(
+        f"{meta['chunks']:,} chunks x {meta['dims']} dims ({meta['model']}) -> {out} "
+        f"in {time.perf_counter() - t0:.1f} s"
     )

@@ -91,3 +91,8 @@ def test_openapi_lists_routes(client: httpx.Client) -> None:
     paths = client.get("/openapi.json").json()["paths"]
     assert {"/search", "/docs/{doc_id}", "/stats", "/health"} <= set(paths)
     assert "/_bench/search-async" not in paths
+
+
+def test_semantic_mode_without_embeddings_is_409(client: httpx.Client) -> None:
+    r = client.get("/search", params={"q": "event", "mode": "semantic"})
+    assert r.status_code == 409 and "findex embed" in r.json()["detail"]

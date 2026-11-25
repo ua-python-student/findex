@@ -23,10 +23,12 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 
 from findex import __version__, store
+from findex.fast import NumpyIndex
 from findex.index import Index
 from findex.query import QuerySyntaxError
-from findex.ranking import search_page
+from findex.ranking import Mode, search_page
 from findex.scoring import SCORERS
+from findex.semantic import SemanticIndex, emb_dir
 from findex.web.schemas import DocumentOut, Health, SearchHit, SearchResponse, StatsOut
 from findex.web.settings import Settings, get_settings
 
@@ -42,11 +44,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     if not logging.getLogger().handlers:  # running under plain uvicorn: logs to stdout (12-factor XI)
         logging.basicConfig(stream=sys.stdout, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("findex").setLevel(settings.log_level)
-    app.state.index = None
+    app.state.index = app.state.nx = app.state.sem = None
     app.state.started = time.monotonic()
-    if settings.index_path.exists():
-        app.state.index = await asyncio.to_thread(store.load, settings.index_path)
-        log.info("loaded %r from %s", app.state.index, settings.index_path)
+    path = settings.index_path
+    if path.exists():
+        app.state.index = await asyncio.to_thread(store.load, path)
+        if store.is_binary(path):
+            app.state.nx = NumpyIndex.open(path)  # vectorised BM25 (Lab 8)
+        if emb_dir(path).exists():
+            app.state.sem = await asyncio.to_thread(SemanticIndex.open, path, app.state.index.num_docs)
+        log.info(
+            "loaded %r from %s (numpy=%s, embeddings=%s)",
+            app.state.index,
+            path,
+            app.state.nx is not None,
+            app.state.sem is not None,
+        )
     else:
         log.error("index not found at %s: /health will report 503", settings.index_path)
     yield
@@ -111,16 +124,24 @@ async def request_id(request: Request, call_next: Callable[[Request], Awaitable[
 
 
 # --- the API ----------------------------------------------------------------------
-def run_search(index: Index, q: str, k: int, scorer: ScorerName, page: int) -> SearchResponse:
+def run_search(
+    index: Index, q: str, k: int, scorer: ScorerName, page: int, mode: Mode = "keyword", state: object = None
+) -> SearchResponse:
     """Blocking, CPU-bound: parse + score + snippets."""
     t0 = time.perf_counter()
+    nx: NumpyIndex | None = getattr(state, "nx", None)
+    sem: SemanticIndex | None = getattr(state, "sem", None)
+    if mode != "keyword" and sem is None:
+        raise HTTPException(409, f"mode={mode} needs embeddings: run `findex embed` on the server's index")
     try:
-        total, results = search_page(index, q, SCORERS[scorer], k=k, offset=(page - 1) * k)
+        total, results = search_page(
+            index, q, SCORERS[scorer], k=k, offset=(page - 1) * k, mode=mode, nx=nx, sem=sem
+        )
     except QuerySyntaxError as e:
         raise HTTPException(400, f"bad query: {e}") from None
     return SearchResponse(
         query=q,
-        scorer=scorer,
+        scorer=scorer if mode == "keyword" else mode,
         total=total,
         page=page,
         k=k,
@@ -138,10 +159,19 @@ PageNo = Annotated[int, Query(ge=1, le=1000)]
 
 
 @app.get("/search", response_model=SearchResponse, tags=["api"])
-def search(index: IndexDep, q: Q, k: K = 10, scorer: ScorerName = "bm25", page: PageNo = 1) -> SearchResponse:
-    """Ranked search. Plain `def`: FastAPI runs it in its thread pool, so the CPU work
-    never blocks the event loop (measured: see README, Lab 7)."""
-    return run_search(index, q, k, scorer, page)
+def search(
+    request: Request,
+    index: IndexDep,
+    q: Q,
+    k: K = 10,
+    scorer: ScorerName = "bm25",
+    page: PageNo = 1,
+    mode: Mode = "keyword",
+) -> SearchResponse:
+    """Ranked search. `mode`: keyword (BM25/TF-IDF), semantic (embeddings) or hybrid (RRF).
+    Plain `def`: FastAPI runs it in its thread pool, so the CPU work never blocks the event
+    loop (measured: see README, Lab 7)."""
+    return run_search(index, q, k, scorer, page, mode, request.app.state)
 
 
 @app.get("/docs/{doc_id}", response_model=DocumentOut, tags=["api"])
@@ -195,19 +225,23 @@ async def search_async_to_thread(index: IndexDep, q: Q, k: K = 10) -> SearchResp
 
 # --- the UI -------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-def home(request: Request, q: str = "", page: PageNo = 1, scorer: ScorerName = "bm25") -> HTMLResponse:
+def home(
+    request: Request, q: str = "", page: PageNo = 1, scorer: ScorerName = "bm25", mode: Mode = "keyword"
+) -> HTMLResponse:
     index: Index | None = request.app.state.index
     ctx: dict[str, object] = {
         "q": q,
         "page": page,
         "scorer": scorer,
+        "mode": mode,
+        "has_sem": request.app.state.sem is not None,
         "res": None,
         "error": None,
         "num_docs": index.num_docs if index else 0,
     }
     if q.strip() and index is not None:
         try:
-            ctx["res"] = run_search(index, q[:200], 10, scorer, page)
+            ctx["res"] = run_search(index, q[:200], 10, scorer, page, mode, request.app.state)
         except HTTPException as e:
             ctx["error"] = e.detail
     template = "_results.html" if request.headers.get("hx-request") else "index.html"

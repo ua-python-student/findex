@@ -44,6 +44,11 @@ def save(index: Index, path: Path, fmt: Format = "binary") -> None:
         save_binary(index, path)
 
 
+def is_binary(path: Path) -> bool:
+    with open(path, "rb") as f:
+        return f.read(len(MAGIC)) == MAGIC
+
+
 @timed
 def load(path: Path) -> Index:
     with open(path, "rb") as f:

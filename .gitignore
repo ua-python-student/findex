@@ -14,3 +14,4 @@ crawl.log
 mirror/
 .venv-ft/
 .env
+*.emb/

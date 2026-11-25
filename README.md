@@ -1,10 +1,68 @@
 # findex — a search engine built from scratch in Python
 
-> **Live demo:** `https://findex-<user>.onrender.com` — *to be filled in after deployment (see Lab 7, "Deployment")* · API docs at `/docs`
+**findex** indexes 1,596 documents of the Python, Django and NumPy documentation and answers Boolean, phrase, BM25-ranked, semantic and hybrid queries — from a CLI, a JSON API and a web page. Every layer (tokenizer, inverted index, ranking, query parser, parallel indexer, async crawler, web service, NumPy scorer, embeddings) is written in this repository, one lab at a time.
+
+> **Live demo:** `https://findex-<user>.onrender.com` — *added after deployment (Lab 7)* · **Demo video (2–3 min):** *link added after recording* · **GIF of a search:** `docs/demo.gif` *(to be recorded from the running UI)*
 
 [![CI](https://github.com/<user>/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/<user>/findex/actions/workflows/ci.yml)
 
-Semester project for the course *Python — Build a Search Engine*. One lab = one language feature + one project step.
+| Corpus | Search latency | Biggest speedup |
+|---|---|---|
+| **1,596 docs · 26 MB · 3.1 M tokens · 63.6 K terms** | **p95 16.7 ms** (one client, `/search`, 1 worker, 2 vCPU) | **20–31×** — vectorised BM25 vs the Lab 3 loop on a frequent term |
+
+```bash
+uv tool install .                    # or the wheel from a GitHub release
+./scripts/get_corpus.sh              # download the corpus into data/
+findex index data/ --out index.bin   # parallel map-reduce build, ~4 s
+findex embed index.bin               # chunk embeddings for semantic/hybrid search
+findex search index.bin 'asyncio (TaskGroup OR gather) "structured concurrency"'
+findex search index.bin 'save python objects to a file and restore them later' --mode hybrid
+INDEX_PATH=index.bin findex serve    # http://localhost:8000  (API docs: /docs)
+```
+
+## Architecture
+
+```mermaid
+flowchart LR
+    W[(web sites)] -->|"crawler · asyncio, httpx (Lab 6)"| J[data/crawl.jsonl]
+    D[(data/*.txt)] --> C
+    J --> C["corpus + tokenizer<br/>generators, NFC, casefold (Lab 1)"]
+    C -->|"map-reduce build<br/>processes (Lab 5)"| I["inverted index<br/>dict · dataclasses · array · binary file (Lab 2)"]
+    I --> Q["query parser + BM25/TF-IDF<br/>data model · protocols (Lab 3)"]
+    I --> N["NumPy postings · memmap<br/>vectorised BM25 (Lab 8)"]
+    I --> E["chunk embeddings · E @ q<br/>RRF hybrid (Lab 8)"]
+    Q --> S[search_page]
+    N --> S
+    E --> S
+    S --> CLI["findex CLI<br/>typer · rich (Lab 4)"]
+    S --> API["FastAPI JSON API + Jinja/htmx UI<br/>Docker (Lab 7)"]
+```
+
+## All measurements in one place
+
+| Lab | What was measured | Result |
+|---|---|---|
+| 1 | eager lists vs lazy generators, full corpus | peak memory **212 MiB → 8.1 MiB**, same time (~10 s) |
+| 2 | postings representation | `list[Posting]` 71 MiB → slots 47 MiB → `array('I')` **26 MiB**; binary file 6.7 MiB vs pickle 10.9 MiB, saves 16× faster |
+| 2 | two-pointer merge vs `set` | set (C loop) 2.5–6× faster on frequent terms; merge wins on tiny lists |
+| 3 | TF-IDF vs BM25, P@5 on 10 labelled queries | 0.36 vs 0.36 (ceiling 0.54); the three ranking sanity checks hold |
+| 4 | tests / typing | 47 tests (now 133), 3+ Hypothesis properties, pyright strict 0 errors, 83 % branch coverage |
+| 5 | parallel build, 2 vCPU | threads (GIL) 0.96×, processes **1.20×**, free-threaded 3.13t threads 1.47×; merge ≈ 24 % → Amdahl ceiling 1.6× on 2 cores; GIL-hidden race: 8,675 lost updates on 3.13t |
+| 6 | crawler, 300 pages, local mirror | 6 pages/s sequential → **110 pages/s** at concurrency 20 (no limits); 11.7 pages/s with polite per-host limits |
+| 7 | `/search` under load (c=50) | 1 worker 55 RPS (CPU-bound); `def` keeps `/health` at 160 ms vs 448 ms for blocking `async def`; 2 workers 87 RPS |
+| 8 | NumPy scorer vs Lab 3 scorer | **20–31×** on frequent terms, 5–6× on 3-term queries, 0.8× on rare terms; load 1.5 s → 0.22 s with memmap |
+| 8 | after fixing the real web hotspot (snippets) | **55 → 101 RPS**, single-client p95 31.8 → **16.7 ms** |
+| 8 | keyword vs semantic vs hybrid, P@5 | 10 originals 0.36 / 0.40 / 0.38; 5 paraphrases 0.16 / 0.20 / **0.24** |
+
+## Limitations and next steps
+
+* Measured on a 2-vCPU cloud VM: the parallel speedups are capped by two cores, and the load generator shares the machine with the server.
+* Semantic search uses **LSA** (TF-IDF + truncated SVD, 256 dims) trained on the corpus, because model downloads were not possible where the measurements were made. `findex embed --model all-MiniLM-L6-v2` uses a neural sentence-transformers model through the same code path where it can be downloaded; it should do much better on paraphrases.
+* The index is immutable: adding a document means rebuilding (incremental indexing and resumable crawling are the Lab 6 stretch).
+* The query evaluator materialises whole postings lists; there is no skip-list / WAND early termination, which a much larger corpus would need. Brute-force `E @ q` over 18 K chunks takes ~2 ms; past ~10⁶ chunks an ANN index (HNSW) is needed.
+* The crawler's frontier is one FIFO queue: with per-host limits, workers queue at one host while others idle (per-host frontier queues would fix it).
+* Labelled evaluation is tiny (15 queries) — differences of 0.02–0.04 in P@5 are noise.
+* Not done in this environment: the Docker image build, the public deployment and its load-test row, the GIF and the demo video.
 
 ## Corpus
 
@@ -353,3 +411,87 @@ Throughput is the same — there is one core's worth of Python to execute either
 ### Deployment
 
 Multi-stage `Dockerfile` (uv's official image as the builder, `uv sync --locked --no-dev`, then a `python:3.13-slim` runtime with only `.venv` and the app, non-root user `app`, `HEALTHCHECK` on `/health`, config only from `INDEX_PATH`/`PORT`/`LOG_LEVEL`), `.dockerignore`, and `render.yaml` (Docker runtime, `healthCheckPath: /health`). Deploying is: push the repo, create the Render (or Fly.io) service from it, wait for the green health check, put the URL at the top of this README and run `python scripts/loadtest.py "https://<url>/search?q={q}" -c 20 -z 30` for the last row. *My work environment had neither Docker nor access to a hosting platform, so the image was not built and the service was not deployed here — this row and the live URL are the remaining steps.*
+
+## Lab 8 — Fast, then smart: profiling, NumPy, semantic search
+
+```bash
+uv run python -m cProfile -o rank.prof scripts/profile_lab08.py search python --cprofile
+uv run py-spy record -o docs/flamegraph_index.svg -- .venv/bin/python scripts/profile_lab08.py index
+uv run scalene run --cpu-only --profile-all scripts/profile_lab08.py --- index
+uv run python scripts/bench_lab08.py          # NumPy vs Lab 3 table
+findex embed index.bin                        # 18,254 chunks x 256 dims, ~15 s on CPU
+uv run python scripts/eval_lab08.py           # 15-query precision@5
+uv run pytest tests/test_bench.py --benchmark-enable --benchmark-only
+```
+
+### M1 — Profile first, then pick targets
+
+Flame graphs: [`docs/flamegraph_index.svg`](docs/flamegraph_index.svg) (serial build) and [`docs/flamegraph_search.svg`](docs/flamegraph_search.svg) (`findex search`: load + 30 queries). cProfile of the ranking loop alone: `docs/profiles/rank_python.prof`.
+
+Top-3 hotspots **written down before changing anything**:
+
+1. **Search process: `load_binary`** — ~70 % of py-spy samples of a `findex search` run are in the loop that turns the arrays of the binary file back into 650 K `Posting` objects (`store.py:145`). *Python time*: object creation, one at a time. *Hypothesis:* map the file with `np.memmap` and keep the postings as array views → load time proportional to the number of terms, not postings.
+2. **`rank`: one `BM25.score` call per posting** — 46,650 calls for 30 queries, ~60 % of `rank`'s time in cProfile (plus `index.df`, `BM25.idf`, `num_docs` property calls per posting); the `merge_or` Python loop is another ~25 %. *Python time*: interpreter dispatch, attribute lookups, boxing floats. *Hypothesis:* the whole postings list of a term in one array expression → 10×+ on long postings lists, nothing on short ones.
+3. **Index build: tokenisation and the merge** — `normalize` + `tokenize_with_positions` ≈ 30 % of samples, materialising `Posting` objects in `merge` ≈ 22 %, the per-token Python loop in `build_partial` ≈ 25 %. Scalene marks the regex and NFC lines as mostly *native* time (`tokenize.py:39`: 3.2 % Python / 5.7 % native; `normalize`: all native), so vectorising will not help them. *Decision:* not changed in this lab (the build is a one-off 4 s); documented as a limit. (Scalene 2.4 attributed ~75 % of samples to `threading.py` in this container, so its per-line split is used only for the lines it did attribute to `findex`.)
+
+`pytest-benchmark` (`tests/test_bench.py`) covers `rank` (both engines) and `build_index` on the fixture corpus; the baseline is committed in `.benchmarks/` and CI fails on a > 50 % slowdown of the mean (`--benchmark-compare-fail=mean:50%`).
+
+### M2 — Vectorised scorer (`src/findex/fast.py`)
+
+`NumpyIndex.open(path)` memory-maps the Lab 2 binary file and keeps, per term, `np.frombuffer` views of `doc_ids` and `tfs` (`uint32` in the file — no copies) and `doc_len` as one `int32[N]` array. Boolean nodes are evaluated with `np.intersect1d` / `np.union1d` / `np.setdiff1d`; phrases use positions. Per query term, BM25 for **all** its postings is one expression — `idf * tf * (k1+1) / (tf + k1*(1 - b + b*doc_len[ids]/avgdl))` (fancy indexing into `doc_len`, ufuncs), accumulated with `scores[ids] += s`; top-k is `np.partition` + `np.lexsort` on the survivors (score desc, doc_id asc — the same tie-break as Lab 3). **Rankings are identical** to the Lab 3 scorer: `tests/test_fast.py` checks doc order and scores (rel. tol 1e-12) for 10 queries × 2 scorers × 2 constructions, plus 4 queries on the full corpus.
+
+| Query | Docs matched | Lab 3 scorer (ms) | NumPy scorer (ms) | Speedup |
+|---|---|---|---|---|
+| common term `the` | 1,474 | 0.753 | 0.037 | 20.4× |
+| rare term `pickletools` | 8 | 0.013 | 0.016 | 0.8× |
+| 3-term `python OR thread OR process` | 1,047 | 1.105 | 0.196 | 5.6× |
+| 3-term AND `python thread process` | 116 | 0.364 | 0.074 | 4.9× |
+
+| Load | Time (s, median of 5) |
+|---|---|
+| `store.load` (Lab 2 binary → `Posting` objects) | 1.508 |
+| `NumpyIndex.open` (`np.memmap` views) | 0.223 |
+
+(best of 7 `timeit` repeats; a second run gave 30.9× / 0.8× / 3.8× / 4.1× — 20–31× on the frequent term is the honest range.)
+
+**Why the speedups differ.** For `the` (1,474 postings) the Lab 3 loop runs ~1,500 Python-level `score()` calls, each a dozen bytecodes, attribute lookups and float boxing; NumPy runs ~10 C loops over contiguous arrays — 20–31×. For `pickletools` (8 postings) there is almost no loop to remove, and NumPy's fixed costs (creating arrays, ~15 function calls of a few µs each, `np.zeros(N)` for the score vector) are larger than 8 Python iterations: 0.8×, i.e. slightly *slower*. The 3-term queries sit in between (5–6×): part of the time is now parsing the query (pure Python), the set operations (`union1d` sorts), and per-call overhead, which do not shrink with vectorisation. Load: `NumpyIndex.open` 0.22 s vs 1.51 s — what remains is parsing the JSON header (63 K terms), constant with respect to the number of postings.
+
+**The surprise: the web service did not get faster.** The load test after M2 still gave 55 RPS. Splitting one request (`scripts/experiments/lab08_request_split.py`, 200 load-test queries):
+
+| Step (per request) | before (ms) | after fixing snippets (ms) |
+|---|---|---|
+| rank (Lab 3, Python) | 0.86 | 0.73 |
+| rank (NumPy) | 0.31 | 0.25 |
+| decompress 10 docs | 1.16 | 0.99 |
+| snippets for 10 docs | 13.06 | 4.95 |
+
+Ranking was never the web bottleneck — **snippets** were: a case-insensitive alternation regex with look-arounds over up to 100 KB of text per result. Scanning a `lower()`-ed copy with a case-sensitive pattern (offsets stay valid when the length does not change; fallback otherwise) made snippets 2.6× faster, and the service went from **55 to 101 RPS** at c=50 (p50 909 → 486 ms) and from p95 31.8 to **16.7 ms** with one client. The profile of the *right* path matters more than the speed of the part you guessed.
+
+### M3 — Semantic and hybrid search (`src/findex/semantic.py`)
+
+* `findex embed index.bin [--model lsa|<sentence-transformers model>]`: every document is split into ~200-word chunks with 40-word overlap (title prepended) — 18,254 chunks; each chunk is embedded and **L2-normalised**; `E: float32[18254, 256]` + `chunk_doc: int32[...]` are saved as `.npy` next to the index.
+* **Embedding model.** Hugging Face was not reachable from the environment, so the reported numbers use **LSA**: TF-IDF over the chunks (sublinear tf, English stop words), then `TruncatedSVD` to 256 dimensions, fitted on this corpus (26.9 % of variance kept). It is a genuine dense embedding — words that co-occur end up in nearby directions, so a query can match text that shares none of its words — but much weaker than a neural sentence model. The `sentence-transformers` path (e.g. `all-MiniLM-L6-v2`, 384 dims) is implemented behind the same `Embedder` protocol.
+* `mode=semantic`: embed the query, `E @ q` = cosine with every chunk in one matrix-vector product (~2 ms for 18 K × 256), a document's score is its **best chunk** (`np.maximum.at`). `mode=hybrid`: BM25 top-100 (a plain-language query becomes an OR of its words; a query with operators is kept as typed) and semantic top-100 fused by **Reciprocal Rank Fusion**, `Σ 1/(60 + rank)`. `mode` is in the CLI (`--mode`), the API (`?mode=`, 409 if the server has no embeddings) and the UI (a select next to the scorer).
+
+| # | Query | type | P@5 keyword | P@5 semantic | P@5 hybrid |
+|---|---|---|---|---|---|
+| 1 | asyncio task cancellation timeout | keyword | 0.2 | 0.4 | 0.4 |
+| 2 | pickle security untrusted data | keyword | 0.2 | 0.2 | 0.2 |
+| 3 | numpy broadcasting rules | keyword | 0.2 | 0.2 | 0.2 |
+| 4 | django database migrations | keyword | 0.6 | 0.6 | 0.6 |
+| 5 | logging handler formatter | keyword | 0.6 | 0.6 | 0.6 |
+| 6 | regular expression groups | keyword | 0.4 | 0.4 | 0.4 |
+| 7 | dataclass frozen slots | keyword | 0.2 | 0.2 | 0.2 |
+| 8 | django cache backend | keyword | 0.2 | 0.2 | 0.2 |
+| 9 | random number generator seed | keyword | 0.6 | 0.6 | 0.6 |
+| 10 | free threading GIL | keyword | 0.4 | 0.6 | 0.4 |
+| 11 | run several coroutines at the same time and wait for all of them | paraphrase | 0.2 | 0.4 | 0.4 |
+| 12 | save python objects to a file and restore them later | paraphrase | 0.0 | 0.0 | 0.2 |
+| 13 | show my website in other languages | paraphrase | 0.2 | 0.4 | 0.2 |
+| 14 | arithmetic between arrays of different shapes | paraphrase | 0.2 | 0.2 | 0.2 |
+| 15 | split a long list of results across several pages | paraphrase | 0.2 | 0.0 | 0.2 |
+| | **mean, 10 original** | | **0.36** | **0.40** | **0.38** |
+| | **mean, 5 paraphrases** | | **0.16** | **0.20** | **0.24** |
+| | **mean, all 15** | | **0.29** | **0.33** | **0.33** |
+
+**What the table says.** On the 10 keyword-style queries the three modes are within noise (0.36 / 0.40 / 0.38): the right documents contain the query words, BM25 finds them, and LSA mostly agrees. On the **paraphrases**, keyword search loses — *"save python objects to a file and restore them later"* gets 0.0 because the pickle page says "serialize", "pickling", "unpickling", never "save … restore" — and the fused ranking is the best (0.24 vs 0.16): RRF promotes documents that are high in *both* lists, so it keeps BM25's precision on rare exact terms and adds the semantic matches. LSA alone also fails some paraphrases (*split … across several pages* → 0.0 for semantic: in this corpus "pages" co-occurs with documentation pages, not with Django's `Paginator`), which is exactly why hybrid beats either signal alone. With 5 paraphrase queries this is a direction, not a result; a neural model would be the first thing to try.

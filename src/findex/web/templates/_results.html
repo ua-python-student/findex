@@ -13,8 +13,8 @@
   </ol>
   {% if res.pages > 1 %}
   <nav class="pager">
-    {% if res.page > 1 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ res.page - 1 }}">← previous</a>{% endif %}
-    {% if res.page < res.pages %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&page={{ res.page + 1 }}">next →</a>{% endif %}
+    {% if res.page > 1 %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ res.page - 1 }}">← previous</a>{% endif %}
+    {% if res.page < res.pages %}<a href="/?q={{ q | urlencode }}&scorer={{ scorer }}&mode={{ mode }}&page={{ res.page + 1 }}">next →</a>{% endif %}
   </nav>
   {% endif %}
 {% elif q and not error %}<p class="meta">Nothing matches <b>{{ q }}</b>.</p>{% endif %}

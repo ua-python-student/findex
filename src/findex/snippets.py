@@ -14,8 +14,17 @@ def snippet(text: str, terms: Iterable[str], width: int = 80, mark: tuple[str, s
     text = unicodedata.normalize("NFC", text)
     if not terms:
         return " ".join(text[: 2 * width].split())
-    pattern = re.compile(r"(?<!\w)(" + "|".join(map(re.escape, terms)) + r")(?!\w)", re.IGNORECASE)
-    matches = list(pattern.finditer(text))
+    alternation = "|".join(map(re.escape, terms))
+    pattern = re.compile(r"(?<!\w)(" + alternation + r")(?!\w)", re.IGNORECASE)
+    # Lab 8: scanning a lower-cased copy without IGNORECASE is ~4x faster on long documents;
+    # offsets stay valid when lower() keeps the length (true for almost all text).
+    low = text.lower()
+    if len(low) == len(text):
+        matches = list(re.finditer(r"(?<!\w)(?:" + alternation + r")(?!\w)", low))
+        if not matches:  # e.g. casefold-only forms (ß -> ss): fall back
+            matches = list(pattern.finditer(text))
+    else:
+        matches = list(pattern.finditer(text))
     if not matches:
         return " ".join(text[: 2 * width].split())
     # best centre = the match whose ±width window holds the most *distinct* terms
